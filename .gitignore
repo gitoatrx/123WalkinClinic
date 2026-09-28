@@ -4,8 +4,8 @@ out/
 next-env.d.ts
 *.tsbuildinfo
 
-# Juno EMR password — never commit
-server/emr-config.php
+# Local build settings (see .env.example)
+.env*.local
 
 # Local Claude Code settings
 .claude/

@@ -13,9 +13,10 @@ export const site = {
   email: "moa@123walkin.com",
   emailHref: "mailto:moa@123walkin.com",
   /**
-   * Where the Book buttons go. "/book/" is the demo of the Cortico flow built into
-   * this site (no real bookings). To send patients to real booking instead, set
-   * this to corticoUrl — Cortico can't be embedded (X-Frame-Options: DENY).
+   * Where the Book buttons go. "/book/" is the Cortico-style flow built into this
+   * site: it books through Bimble when NEXT_PUBLIC_BIMBLE_CLINIC_SLUG is set, and
+   * is a demo otherwise. To send patients to Cortico instead, set this to
+   * corticoUrl — Cortico can't be embedded (X-Frame-Options: DENY).
    */
   bookingUrl: "/book/",
   /** The clinic's real Cortico booking page — the same link the live site uses. */

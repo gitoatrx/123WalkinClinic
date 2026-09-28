@@ -1,8 +1,8 @@
 // Booking flow modelled on the clinic's Cortico page (123walkin.cortico.ca).
-// With the EMR API connected (lib/emr.ts) doctors, dates and times come from
-// Juno and the booking is written into Juno. Without it this is a demo: open
-// times are simulated and nothing is sent anywhere. The site itself never
-// stores health card numbers; they are only passed to the clinic's EMR.
+// With Bimble connected (lib/bimble.ts) doctors, dates and times come from the
+// clinic's Bimble schedule and the booking is made in Bimble. Without it this is
+// a demo: open times are simulated and nothing is sent anywhere. The site itself
+// never stores health card numbers; they are only passed to Bimble.
 
 export const clinicLocation = {
   name: "Abbotsford",
@@ -33,15 +33,6 @@ export const sexOptions = [
 
 export const formNoteOptions = ["No", "Yes – doctor’s note (fee may apply)", "Yes – form (fee may apply)"];
 
-// Demo pharmacies, clearly not real businesses.
-export const demoPharmacies = [
-  "Demo Pharmacy – Gladwin Rd., Abbotsford, BC",
-  "Demo Pharmacy – South Fraser Way, Abbotsford, BC",
-  "Demo Pharmacy – Mission, BC",
-  "Demo Pharmacy – Chilliwack, BC",
-  "Demo Pharmacy – Langley, BC",
-];
-
 export const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
 export type BookingData = {
@@ -59,19 +50,22 @@ export type BookingData = {
   cellPhone: string;
   homePhone: string;
   reason: string;
+  /** Optional; sent to Bimble so the doctor sees it. */
+  allergies: string;
   formNote: string;
-  /** Juno providerNo, or "any" for the first available doctor (live mode). */
+  /** Bimble doctor id, or "any" for the first available doctor (live mode). */
   providerId: string;
   provider: string;
   sex: string;
   method: MethodId | "";
   date: string;
   time: number | null;
-  /** Live mode: Juno's ISO start time and the doctor who owns that slot. */
-  slotStart: string;
-  slotProvider: string;
+  /** Live mode: Bimble's slot label ("9:15 AM") and the doctor who has that time. */
+  slotTime: string;
+  slotDoctorId: number | null;
   delivery: "delivery" | "pickup";
   pharmacy: string;
+  pharmacyConsent: boolean;
   notes: string;
 };
 
@@ -90,6 +84,7 @@ export const emptyBooking: BookingData = {
   cellPhone: "",
   homePhone: "",
   reason: "",
+  allergies: "",
   formNote: formNoteOptions[0],
   providerId: "any",
   provider: providers[0],
@@ -97,10 +92,11 @@ export const emptyBooking: BookingData = {
   method: "",
   date: "",
   time: null,
-  slotStart: "",
-  slotProvider: "",
+  slotTime: "",
+  slotDoctorId: null,
   delivery: "pickup",
   pharmacy: "",
+  pharmacyConsent: false,
   notes: "",
 };
 
