@@ -158,3 +158,14 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Browsers paint autofilled fields blue; keep each field's own background (white, or the
+   booking form's grey boxes) by never letting the autofill colour transition in. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+select:-webkit-autofill {
+  transition: background-color 600000s 0s, color 600000s 0s;
+  -webkit-text-fill-color: #1b2437;
+  caret-color: #1b2437;
+}

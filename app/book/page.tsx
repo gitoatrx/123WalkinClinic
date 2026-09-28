@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { pageMeta } from "@/lib/seo";
-import { CorticoFlow } from "@/components/booking/CorticoFlow";
+import { BookingFlow } from "@/components/booking/BookingFlow";
 
 export const metadata: Metadata = {
   ...pageMeta({
@@ -13,5 +13,5 @@ export const metadata: Metadata = {
 };
 
 export default function BookPage() {
-  return <CorticoFlow />;
+  return <BookingFlow />;
 }

@@ -1,9 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Plus_Jakarta_Sans } from "next/font/google";
 import type { ReactNode } from "react";
-import { BackToTop } from "@/components/BackToTop";
-import { Footer } from "@/components/Footer";
-import { Header } from "@/components/Header";
 import { clinicJsonLd, JsonLd } from "@/lib/seo";
 import { site } from "@/lib/site";
 import "./globals.css";
@@ -50,14 +47,8 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <noscript>
           <style>{"[data-animate]{opacity:1!important;transform:none!important;filter:none!important}"}</style>
         </noscript>
-        <Header />
-        {/* Entrance animations start off to the side; clip them here (not on <body>,
-            whose overflow passes to the viewport and would still allow sideways scroll). */}
-        <main id="main" className="flex-1 overflow-x-clip">
-          {children}
-        </main>
-        <Footer />
-        <BackToTop />
+        {/* Site pages add the header and footer ((site)/layout.tsx); the booking page is full-screen. */}
+        {children}
         <JsonLd data={clinicJsonLd} />
       </body>
     </html>
