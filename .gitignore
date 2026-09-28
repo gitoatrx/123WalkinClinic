@@ -1,0 +1,11 @@
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# Juno EMR password — never commit
+server/emr-config.php
+
+# Local Claude Code settings
+.claude/
