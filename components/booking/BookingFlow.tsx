@@ -574,7 +574,15 @@ export function BookingFlow() {
     setBusy(true);
     try {
       if (!verified) {
-        verified = (await bimble.verifyPhone(otp.sessionId, digits(entered))).access_token;
+        try {
+          verified = (await bimble.verifyPhone(otp.sessionId, digits(entered))).access_token;
+        } catch (e) {
+          // A wrong or expired code: say so under the boxes, empty them and start again at the first.
+          setErrors({ code: errorText(e, "That code didn’t work. Please try again.") });
+          setCode("");
+          setTimeout(() => document.querySelector<HTMLInputElement>('input[aria-label="Digit 1"]')?.focus(), 0);
+          return;
+        }
         setToken({ phone: b.cellPhone, value: verified });
         setOtp(null);
         setCode("");
@@ -1426,7 +1434,7 @@ export function BookingFlow() {
                     className={cn(field, errors.emergencyName && "shadow-[inset_0_0_0_2px_#c92a2a]")}
                   />
                   {errors.emergencyName && <Err>{errors.emergencyName}</Err>}
-                  <div className="grid grid-cols-2 gap-2 lg:gap-2.5">
+                  <div className="grid gap-2 sm:grid-cols-2 lg:gap-2.5">
                     <Dropdown
                       ariaLabel="Relationship"
                       placeholder="Relationship"
