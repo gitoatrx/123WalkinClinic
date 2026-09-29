@@ -150,9 +150,19 @@ export const bimble = {
   live: bimbleClinicSlug !== "",
 
   /** Reasons for visit, as Bimble's own booking pages list them (one per display reason of each active service). */
+  /**
+   * Reasons a patient can pick, in Bimble's words. When the clinic has chosen the services it
+   * offers in Bimble, only those; otherwise Bimble's full list.
+   */
   async reasons(): Promise<BimbleReason[]> {
-    const rows = await request<ServiceRecord[] | { services?: ServiceRecord[] }>("/services");
-    const services = Array.isArray(rows) ? rows : (rows.services ?? []);
+    const [rows, offered] = await Promise.all([
+      request<ServiceRecord[] | { services?: ServiceRecord[] }>("/services"),
+      request<{ clinic?: { services?: { service_id?: unknown }[] } }>(clinicPath())
+        .then((r) => new Set((r.clinic?.services ?? []).map((x) => Number(x.service_id)).filter((id) => Number.isInteger(id) && id > 0)))
+        .catch(() => new Set<number>()), // the full list still works if the clinic's own can't load
+    ]);
+    const all = Array.isArray(rows) ? rows : (rows.services ?? []);
+    const services = offered.size ? all.filter((s) => offered.has(s.service_id)) : all;
     const seen = new Set<string>();
     const out: BimbleReason[] = [];
     for (const s of services) {
