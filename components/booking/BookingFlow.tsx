@@ -959,13 +959,22 @@ export function BookingFlow() {
                   </p>
                 ) : (
                   <>
-                    <div className="-mx-5 mb-2.5 flex gap-2 overflow-x-auto px-5 pb-1 [scrollbar-width:none] lg:mx-0 lg:mb-3 lg:px-0">
+                    <div className="-mx-5 mb-2.5 flex gap-2 overflow-x-auto px-5 pb-1 [scrollbar-width:none] lg:mx-0 lg:mb-3 lg:flex-wrap lg:overflow-visible lg:px-0 lg:pb-0">
                       {dates.map((d) => (
                         <button
                           key={d}
                           type="button"
                           aria-pressed={b.date === d}
-                          onClick={() => {
+                          onClick={(e) => {
+                            // Phones scroll the row of days: slide the chosen day to the middle.
+                            const chipEl = e.currentTarget;
+                            const row = chipEl.parentElement;
+                            setTimeout(() => {
+                              if (!row || row.scrollWidth <= row.clientWidth) return;
+                              const c = chipEl.getBoundingClientRect();
+                              const r = row.getBoundingClientRect();
+                              row.scrollTo({ left: row.scrollLeft + c.left - r.left - (r.width - c.width) / 2, behavior: "smooth" });
+                            }, 0);
                             setMoreTimes(false);
                             const first = slots.find((s) => s.date === d);
                             if (first) pickSlot(first);
