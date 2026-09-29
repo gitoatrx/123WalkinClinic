@@ -44,9 +44,12 @@ export type BookingData = {
   /** Bimble doctor id, or "any" for the first available doctor. */
   providerId: string;
   provider: string;
+  /** What the patient sees in the field, e.g. "Doctor’s note". */
   reason: string;
   /** Bimble service behind the chosen reason (live mode picks reasons from Bimble's list). */
   reasonServiceId: number | null;
+  /** Bimble's own name for that reason ("Sick note or medical form"); sent to Bimble. */
+  reasonBimble: string;
   // 2 · Find your record
   hasCard: boolean;
   cardNumber: string;
@@ -94,6 +97,7 @@ export const emptyBooking: BookingData = {
   provider: "First available",
   reason: "",
   reasonServiceId: null,
+  reasonBimble: "",
   hasCard: true,
   cardNumber: "",
   email: "",
@@ -122,6 +126,23 @@ export const emptyBooking: BookingData = {
   notes: "",
   terms: false,
 };
+
+/**
+ * BC Personal Health Number check, as in Bimble (lib/form-validation.ts): 10 digits, starts with 9,
+ * and a Mod-11 check digit (digits 2–9 weighted 2, 4, 8, 5, 10, 9, 7, 3). "" when valid.
+ */
+export function phnError(value: string) {
+  const phn = value.replace(/\D/g, "");
+  if (phn.length < 10) return "BC PHNs are 10 digits.";
+  if (phn[0] !== "9") return "BC PHNs always start with 9.";
+  const weights = [2, 4, 8, 5, 10, 9, 7, 3];
+  const sum = weights.reduce((total, w, i) => total + Number(phn[i + 1]) * w, 0);
+  const checkDigit = (11 - (sum % 11)) % 11;
+  if (checkDigit === 10 || checkDigit !== Number(phn[9])) {
+    return "That doesn’t look like a valid BC PHN — please double-check the number on your BC Services Card.";
+  }
+  return "";
+}
 
 /** "6045550147" / "+1 604 555 0147" → "604-555-0147", formatted as it is typed; at most 10 digits. */
 export function formatPhone(value: string) {
@@ -152,6 +173,21 @@ export function dobToIso(value: string) {
   if (dt.getUTCFullYear() !== year || dt.getUTCMonth() !== month - 1 || dt.getUTCDate() !== day) return "";
   if (year < 1900 || dt.getTime() > Date.now()) return "";
   return `${year}-${pad(month)}-${pad(day)}`;
+}
+
+/** What is wrong with a typed date of birth, in Bimble's words; "" when it is fine. */
+export function dobError(value: string) {
+  const d = value.replace(/\D/g, "");
+  if (d.length !== 8) return "Enter your date of birth as MM / DD / YYYY.";
+  const month = Number(d.slice(0, 2));
+  const day = Number(d.slice(2, 4));
+  const year = Number(d.slice(4));
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  if (dt.getUTCFullYear() !== year || dt.getUTCMonth() !== month - 1 || dt.getUTCDate() !== day || year < 1900) {
+    return "Enter a valid date of birth.";
+  }
+  if (dt.getTime() > Date.now()) return "Date of birth cannot be in the future.";
+  return "";
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");

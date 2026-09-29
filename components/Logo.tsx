@@ -2,7 +2,7 @@ import Link from "next/link";
 import { site } from "@/lib/site";
 
 /** The clinic's "123VC" logo, served from /public/images (black on light, white on dark). */
-export function Logo({ onDark = false, size = "md" }: { onDark?: boolean; size?: "md" | "lg" }) {
+export function Logo({ onDark = false, size = "md" }: { onDark?: boolean; size?: "sm" | "md" | "lg" }) {
   return (
     <Link
       href="/"
@@ -15,7 +15,7 @@ export function Logo({ onDark = false, size = "md" }: { onDark?: boolean; size?:
         alt={site.name}
         width={120}
         height={37}
-        className={size === "lg" ? "h-12 w-auto sm:h-[63px]" : "h-[47px] w-auto"}
+        className={size === "lg" ? "h-12 w-auto sm:h-[63px]" : size === "sm" ? "h-7 w-auto lg:h-8" : "h-[47px] w-auto"}
       />
     </Link>
   );

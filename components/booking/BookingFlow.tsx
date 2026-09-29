@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type ReactNo
 import { AllergyInput } from "@/components/booking/AllergyInput";
 import { Combobox, useSearch } from "@/components/booking/Combobox";
 import { Dropdown } from "@/components/booking/Dropdown";
+import { Logo } from "@/components/Logo";
 import { CalendarIcon, CheckIcon, ChevronDownIcon, XIcon } from "@/components/icons";
 import {
   bimble,
@@ -23,10 +24,12 @@ import {
   calendarFile,
   clinicLocation,
   dayLabel,
+  dobError,
   dobToIso,
   emptyBooking,
   formatDob,
   formatPhone,
+  phnError,
   methodLabel,
   methods,
   methodShort,
@@ -125,8 +128,8 @@ export function BookingFlow() {
   // What Bimble knows about the clinic
   const [allDoctors, setAllDoctors] = useState<BimbleDoctor[]>([]);
   const [doctors, setDoctors] = useState<BimbleDoctor[]>([]);
-  /** False while the doctors for the chosen reason are loading. */
-  const [doctorsReady, setDoctorsReady] = useState(false);
+  /** The reason (service) the doctors list was loaded for; null = none loaded yet, serviceId null = every doctor. */
+  const [doctorsFor, setDoctorsFor] = useState<{ serviceId: number | null } | null>(null);
   const [visitTypes, setVisitTypes] = useState<string[]>(["virtual", "walkin"]);
   const [reasons, setReasons] = useState<BimbleReason[]>([]);
   const [slots, setSlots] = useState<BimbleSlot[] | null>(null);
@@ -159,7 +162,7 @@ export function BookingFlow() {
         if (off) return;
         setAllDoctors(r.doctors);
         setDoctors(r.doctors);
-        setDoctorsReady(true);
+        setDoctorsFor({ serviceId: null });
         setVisitTypes(r.visitTypes);
       })
       .catch((e) => !off && setApiError(errorText(e, "Could not load the clinic’s doctors.")));
@@ -177,19 +180,24 @@ export function BookingFlow() {
     if (!live) return;
     if (b.reasonServiceId === null) {
       setDoctors(allDoctors);
-      if (allDoctors.length) setDoctorsReady(true);
+      if (allDoctors.length) setDoctorsFor({ serviceId: null });
       return;
     }
+    const serviceId = b.reasonServiceId;
     let off = false;
-    setDoctorsReady(false);
     bimble
-      .doctors({ serviceId: b.reasonServiceId, label: b.reason.trim() })
+      .doctors({ serviceId, label: b.reasonBimble || b.reason.trim() })
       .then((r) => {
         if (off) return;
         setDoctors(r.doctors);
-        setDoctorsReady(true);
+        setDoctorsFor({ serviceId });
       })
-      .catch((e) => !off && setApiError(errorText(e, "Could not load the clinic’s doctors.")));
+      .catch((e) => {
+        if (off) return;
+        setDoctors([]);
+        setDoctorsFor({ serviceId });
+        setApiError(errorText(e, "Could not load the clinic’s doctors."));
+      });
     return () => {
       off = true;
     };
@@ -203,13 +211,23 @@ export function BookingFlow() {
     [live, visitTypes],
   );
   useEffect(() => {
-    if (!b.method || !offeredMethods.some((m) => m.id === b.method)) set({ method: offeredMethods[0]?.id ?? "" });
+    if (b.method && !offeredMethods.some((m) => m.id === b.method)) set({ method: "" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [offeredMethods]);
 
+  /** The doctors list belongs to the chosen reason (not the previous one, while the new list loads). */
+  const doctorsReady = !live || (doctorsFor !== null && doctorsFor.serviceId === b.reasonServiceId);
+  /** A reason is chosen (from Bimble's list when live), so the doctors who see it are known. */
+  const reasonChosen = live ? b.reasonServiceId !== null : b.reason.trim() !== "";
+  /** Open times are shown only once the reason and the visit type are chosen, so they don't change under the patient. */
+  const readyForTimes = reasonChosen && b.method !== "";
+
   // Open times over the next days, for the chosen doctor (or every doctor) and visit type.
   useEffect(() => {
-    if (!b.method) return;
+    if (!readyForTimes) {
+      setSlots(null);
+      return;
+    }
     if (!live) {
       setSlots(availableDates().flatMap((date) => availableTimes(date, b.method).map((t) => ({ date, time: timeLabel(t), doctorId: 0 }))));
       return;
@@ -236,7 +254,8 @@ export function BookingFlow() {
     return () => {
       off = true;
     };
-  }, [live, b.method, b.providerId, doctors, doctorsReady, allDoctors.length, slotsVersion]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live, readyForTimes, b.method, b.providerId, doctors, doctorsReady, allDoctors.length, slotsVersion]);
 
   /** No doctor at the clinic sees the chosen reason online. */
   const noDoctors = live && doctorsReady && !doctors.length;
@@ -250,18 +269,19 @@ export function BookingFlow() {
       provider: b.providerId === "any" ? doctorName(s.doctorId) || "First available" : b.provider,
     });
 
-  // The soonest time is chosen for the patient; they can change it.
+  // The patient picks the time. One that is no longer open (another doctor, visit type or reason) is cleared.
   useEffect(() => {
-    if (!slots) return;
-    const open = slots.some((s) => s.date === b.date && s.time === b.slotTime && s.doctorId === b.slotDoctorId);
-    if (open) return;
-    if (slots.length) pickSlot(slots[0]);
-    else set({ date: "", time: null, slotTime: "", slotDoctorId: null });
+    if (!b.slotTime) return;
+    const open = (slots ?? []).some((s) => s.date === b.date && s.time === b.slotTime && s.doctorId === b.slotDoctorId);
+    if (!open) set({ date: "", time: null, slotTime: "", slotDoctorId: null });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slots]);
 
   const dates = useMemo(() => [...new Set((slots ?? []).map((s) => s.date))], [slots]);
-  const dayTimes = useMemo(() => (slots ?? []).filter((s) => s.date === b.date), [slots, b.date]);
+  /** The day whose times are shown: the one tapped, else the chosen time's day, else the first open day. */
+  const [viewDate, setViewDate] = useState("");
+  const shownDate = dates.includes(viewDate) ? viewDate : dates.includes(b.date) ? b.date : (dates[0] ?? "");
+  const dayTimes = useMemo(() => (slots ?? []).filter((s) => s.date === shownDate), [slots, shownDate]);
   const soonest = slots?.[0];
 
   // ---- suggestions -------------------------------------------------------------------------------
@@ -287,15 +307,17 @@ export function BookingFlow() {
     return QUICK_REASONS.flatMap(([label, keys]) => {
       const r =
         reasons.find((x) => keys.some((k) => x.label.toLowerCase() === k)) ?? reasons.find((x) => keys.some((k) => x.label.toLowerCase().includes(k)));
+      // The button (and the field) keep the friendly name; Bimble's reason is matched behind it.
       return r ? [{ label, reason: r }] : [];
     });
   }, [live, reasons]);
   const addressSearch = useSearch<BimbleAddressSuggestion>(b.addressLine, bimble.searchAddress, live, 3);
   const pharmacySearch = useSearch<BimblePharmacy>(pharmacyQuery, bimble.searchPharmacies, live, 2);
 
-  const chooseReason = (r: BimbleReason) =>
+  /** `shown`: the friendly name to put in the field (a quick button's), else Bimble's own. */
+  const chooseReason = (r: BimbleReason, shown = r.label) =>
     // A new reason can change the doctors, so the doctor choice starts over.
-    set({ reason: r.label, reasonServiceId: r.serviceId, providerId: "any", provider: "First available" });
+    set({ reason: shown, reasonServiceId: r.serviceId, reasonBimble: r.label, providerId: "any", provider: "First available" });
 
   useEffect(() => {
     top.current?.scrollIntoView({ block: "start" });
@@ -319,9 +341,11 @@ export function BookingFlow() {
     }
     if (s === 2) {
       if (b.hasCard) {
-        if (digits(b.cardNumber).length !== 10) e.cardNumber = "Enter your 10-digit BC health card number.";
+        const phn = phnError(b.cardNumber);
+        if (phn) e.cardNumber = digits(b.cardNumber) ? phn : "Enter your 10-digit BC health card number.";
       } else if (!validEmail(b.email)) e.email = "Enter a valid email address.";
-      if (!dobToIso(b.dob)) e.dob = "Enter your date of birth as MM / DD / YYYY.";
+      const dob = dobError(b.dob);
+      if (dob) e.dob = dob;
       if (digits(b.cellPhone).length !== 10) e.cellPhone = "Enter a 10-digit cell phone number that can receive texts.";
     }
     if (s === 3) {
@@ -463,7 +487,7 @@ export function BookingFlow() {
       lastName: b.lastName.trim(),
       sex: sexOptions.find((o) => o.id === b.sex)?.label ?? b.sex,
       address: { street: b.addressLine.trim(), unit: b.unitNumber.trim(), city: b.city.trim(), province: b.province, postalCode: b.postalCode.trim().toUpperCase() },
-      reason: b.reason.trim(),
+      reason: b.reasonBimble || b.reason.trim(),
       serviceId: b.reasonServiceId,
       allergies: b.allergies,
       notes: visitNotes(),
@@ -697,9 +721,9 @@ export function BookingFlow() {
     <div ref={top} className="min-h-dvh bg-[#14243a] text-[#14243a] lg:flex lg:bg-white">
       {/* Side panel (wide screens) */}
       <aside className="sticky top-0 hidden h-dvh w-[42%] max-w-[720px] min-w-[400px] shrink-0 flex-col gap-9 overflow-y-auto bg-[#14243a] px-11 py-10 text-white lg:flex xl:px-16 2xl:px-24">
-        <Link href="/" className={cn("self-start text-2xl font-extrabold tracking-[-0.03em] text-white", ring)}>
-          123VC
-        </Link>
+        <div className="self-start">
+          <Logo onDark size="sm" />
+        </div>
         <div className="flex flex-col gap-3">
           <h1 className="text-[40px] leading-[1.08] font-extrabold tracking-[-0.03em] xl:text-[48px] 2xl:text-[56px]">{copy ? copy.headline : "You’re booked."}</h1>
           <p className="text-base leading-normal text-[#c8d3de]">{copy ? copy.line : `${seeYou}.`}</p>
@@ -766,9 +790,7 @@ export function BookingFlow() {
           {step !== "booked" && (
             <div className="flex h-[60px] items-center justify-between">
               {step === 1 ? (
-                <Link href="/" className={cn("text-xl font-extrabold tracking-[-0.03em]", ring)}>
-                  123VC
-                </Link>
+                <Logo onDark size="sm" />
               ) : (
                 <button type="button" onClick={back} disabled={busy} className={cn("flex h-11 items-center text-sm font-bold", ring)}>
                   ‹ Back
@@ -861,9 +883,11 @@ export function BookingFlow() {
                     invalid={!!errors.reason}
                     className={cn(field, errors.reason && "shadow-[inset_0_0_0_2px_#c92a2a]")}
                     onChange={(text) => {
-                      // Typing keeps the reason only while it still matches a listed one exactly.
-                      const exact = reasons.find((r) => r.label.toLowerCase() === text.trim().toLowerCase());
-                      set({ reason: text, reasonServiceId: exact?.serviceId ?? null });
+                      // Typing keeps the reason only while it still matches a listed one (or a quick button) exactly.
+                      const typed = text.trim().toLowerCase();
+                      const exact =
+                        reasons.find((r) => r.label.toLowerCase() === typed) ?? quickReasons.find((q) => q.label.toLowerCase() === typed)?.reason ?? null;
+                      set({ reason: text, reasonServiceId: exact?.serviceId ?? null, reasonBimble: exact?.label ?? "" });
                     }}
                     onPick={(o) => {
                       const r = reasons.find((x) => `${x.serviceId}:${x.label}` === o.key);
@@ -882,18 +906,19 @@ export function BookingFlow() {
                 )}
                 {quickReasons.length > 0 && (
                   <div className="mt-2.5 flex flex-wrap gap-1.5 lg:mt-3 lg:gap-2">
-                    {quickReasons.map(({ label, reason }) => {
-                      const on = reason ? b.reasonServiceId === reason.serviceId && b.reason === reason.label : b.reason === label;
+                    {quickReasons.map(({ label, reason }, i) => {
+                      const on = b.reason === label && (!reason || b.reasonServiceId === reason.serviceId);
                       return (
                         <button
                           key={label}
                           type="button"
                           aria-pressed={on}
-                          onClick={() => (reason ? chooseReason(reason) : set({ reason: label }))}
+                          onClick={() => (reason ? chooseReason(reason, label) : set({ reason: label }))}
                           className={cn(
                             "h-[34px] rounded-full border px-3 text-[13px] font-semibold lg:h-9 lg:px-3.5",
                             on ? "border-[#14243a] bg-[#14243a] text-white" : "border-[#d5dee6] bg-white text-[#3d4d61] hover:border-[#14243a]",
-                            label === "Skin or rash" && "max-lg:hidden",
+                            // Phones show four, so the row stays short.
+                            i === 2 && "max-lg:hidden",
                             ring,
                           )}
                         >
@@ -940,8 +965,14 @@ export function BookingFlow() {
                 <Dropdown
                   id="doctor"
                   value={b.providerId}
-                  disabled={noDoctors}
-                  options={[{ value: "any", label: noDoctors ? "No doctor for this reason" : "First available doctor" }, ...doctors.map((d) => ({ value: String(d.id), label: d.name }))]}
+                  disabled={noDoctors || !reasonChosen || !doctorsReady}
+                  options={[
+                    {
+                      value: "any",
+                      label: !reasonChosen ? "Choose what it’s for first" : !doctorsReady ? "Finding doctors…" : noDoctors ? "No doctor for this reason" : "First available doctor",
+                    },
+                    ...(reasonChosen && doctorsReady ? doctors.map((d) => ({ value: String(d.id), label: d.name })) : []),
+                  ]}
                   onChange={(v) => set({ providerId: v, provider: v === "any" ? "First available" : doctorName(Number(v)) })}
                   className={cn(field, "font-semibold disabled:text-[#6b7a8c]", ring)}
                 />
@@ -949,7 +980,15 @@ export function BookingFlow() {
 
               <fieldset className="min-w-0">
                 <legend className={qText}>When?</legend>
-                {slots === null ? (
+                {!readyForTimes ? (
+                  <p className="rounded-2xl bg-[#f0f4f7] px-4 py-3 text-sm text-[#3d4d61]">
+                    {!reasonChosen && !b.method
+                      ? "Choose what it’s for and how you’d like to meet to see open times."
+                      : !reasonChosen
+                        ? "Choose what it’s for to see open times."
+                        : "Choose how you’d like to meet to see open times."}
+                  </p>
+                ) : slots === null ? (
                   <p className="text-sm text-[#4a5a6e]">Finding open times…</p>
                 ) : !dates.length ? (
                   <p className="rounded-2xl bg-[#f0f4f7] px-4 py-3 text-sm text-[#3d4d61]">
@@ -964,7 +1003,7 @@ export function BookingFlow() {
                         <button
                           key={d}
                           type="button"
-                          aria-pressed={b.date === d}
+                          aria-pressed={shownDate === d}
                           onClick={(e) => {
                             // Phones scroll the row of days: slide the chosen day to the middle.
                             const chipEl = e.currentTarget;
@@ -976,17 +1015,16 @@ export function BookingFlow() {
                               row.scrollTo({ left: row.scrollLeft + c.left - r.left - (r.width - c.width) / 2, behavior: "smooth" });
                             }, 0);
                             setMoreTimes(false);
-                            const first = slots.find((s) => s.date === d);
-                            if (first) pickSlot(first);
+                            setViewDate(d);
                           }}
-                          className={chip(b.date === d)}
+                          className={chip(shownDate === d)}
                         >
                           {dayLabel(d)}
                         </button>
                       ))}
                     </div>
                     {(() => {
-                      const isOn = (s: BimbleSlot) => s.time === b.slotTime && s.doctorId === b.slotDoctorId;
+                      const isOn = (s: BimbleSlot) => s.date === b.date && s.time === b.slotTime && s.doctorId === b.slotDoctorId;
                       const timeButton = (s: BimbleSlot, extra?: string | false) => {
                         const isSoonest = soonest && s.date === soonest.date && s.time === soonest.time;
                         return (
@@ -1060,7 +1098,13 @@ export function BookingFlow() {
                       autoComplete="off"
                       placeholder="10 digits"
                       value={b.cardNumber}
-                      onChange={(e) => set({ cardNumber: digits(e.target.value).slice(0, 10) })}
+                      onChange={(e) => {
+                        const cardNumber = digits(e.target.value).slice(0, 10);
+                        set({ cardNumber });
+                        // All 10 digits in: check the number right away, as Bimble does.
+                        const problem = cardNumber.length === 10 ? phnError(cardNumber) : "";
+                        if (problem) setErrors((er) => ({ ...er, cardNumber: problem }));
+                      }}
                       aria-invalid={!!errors.cardNumber}
                       className={boxInput}
                     />
@@ -1092,7 +1136,12 @@ export function BookingFlow() {
                   autoComplete="bday"
                   placeholder="MM / DD / YYYY"
                   value={b.dob}
-                  onChange={(e) => set({ dob: formatDob(e.target.value) })}
+                  onChange={(e) => {
+                    const dob = formatDob(e.target.value);
+                    set({ dob });
+                    const problem = dob.replace(/\D/g, "").length === 8 ? dobError(dob) : "";
+                    if (problem) setErrors((er) => ({ ...er, dob: problem }));
+                  }}
                   aria-invalid={!!errors.dob}
                   className={boxInput}
                 />
@@ -1502,16 +1551,19 @@ export function BookingFlow() {
                     ← Back
                   </button>
                 )}
-                {step === 1 && visitSummary && <span className="ml-auto hidden text-sm text-[#4a5a6e] lg:inline">{[methodShort(b.method), when].filter(Boolean).join(" · ")}</span>}
+                {step === 1 && visitSummary && (
+                  // Everything chosen so far, next to Next: visit type, day and time, reason.
+                  <span className="hidden min-w-0 flex-1 text-right text-sm leading-snug text-[#4a5a6e] lg:block">{visitSummary}</span>
+                )}
                 <button
                   type="button"
                   disabled={busy}
                   onClick={awaitingCode ? () => void verifyCode() : next}
-                  className={cn(primary, "w-full lg:w-auto", step === 1 && "max-lg:justify-between", step === 5 && gold, ring)}
+                  className={cn(primary, "w-full lg:ml-auto lg:w-auto", step === 1 && "max-lg:justify-between", step === 5 && gold, ring)}
                 >
                   {step === 1 ? (
                     <>
-                      <span className="text-[13px] font-semibold text-[#c8d3de] lg:hidden">{[methodShort(b.method), when].filter(Boolean).join(" · ")}</span>
+                      <span className="min-w-0 truncate text-[13px] font-semibold text-[#c8d3de] lg:hidden">{visitSummary}</span>
                       <span>Next →</span>
                     </>
                   ) : awaitingCode ? (
