@@ -358,6 +358,7 @@ export function BookingFlow() {
       if (!b.postalCode.trim()) e.postalCode = "Enter your postal code.";
       else if (!validPostalCode(b.postalCode)) e.postalCode = "Enter a valid postal code, e.g. V2T 4V1.";
     }
+    if (s === 4 && b.pharmacy.trim() && !b.delivery) e.delivery = "Choose pick up or home delivery.";
     if (s === 4 && b.pharmacy.trim() && !b.pharmacyConsent) e.pharmacyConsent = "Tick the box to send prescriptions to this pharmacy, or skip the pharmacy.";
     if (s === 5) {
       if (b.emergencyName.trim() || b.emergencyPhone.trim() || b.emergencyRelation) {
@@ -654,8 +655,11 @@ export function BookingFlow() {
     finish(4);
     setStep(5);
   };
-  const choosePharmacy = (p: BimblePharmacy) =>
+  const choosePharmacy = (p: BimblePharmacy) => {
     set({ pharmacy: p.name, pharmacyAddress: p.address, pharmacyCity: p.city, pharmacyPostalCode: p.postalCode, pharmacyPhone: p.phone });
+    // The search did its job: show just the chosen pharmacy. Typing again brings results back.
+    setPharmacyQuery("");
+  };
 
   const downloadCalendar = () => {
     const url = URL.createObjectURL(new Blob([calendarFile(b)], { type: "text/calendar" }));
@@ -675,11 +679,12 @@ export function BookingFlow() {
     const day = dayLabel(b.date);
     return `See you ${day === "Today" || day === "Tomorrow" ? day.toLowerCase() : `on ${day}`} at ${b.slotTime}`;
   })();
+  const deliveryLabel = b.delivery === "delivery" ? "Home delivery" : b.delivery === "pickup" ? "Pick up" : "";
   const stepSummary = [
     visitSummary,
     live && verifiedToken() ? "Verified by text" : b.hasCard ? `Health card ••••${digits(b.cardNumber).slice(-4)}` : b.email,
     [b.firstName, b.lastName].filter(Boolean).join(" "),
-    b.pharmacy ? `${b.pharmacy} · ${b.delivery === "delivery" ? "Home delivery" : "Pick up"}` : "No pharmacy",
+    b.pharmacy ? [b.pharmacy, deliveryLabel].filter(Boolean).join(" · ") : "No pharmacy",
     "",
   ];
   const current = step === "booked" ? 6 : step;
@@ -1290,7 +1295,8 @@ export function BookingFlow() {
             <div className="flex flex-col gap-4">
               <div>
                 <span className={qText}>Pick up or delivery?</span>
-                <div className="mb-6 grid grid-cols-2 gap-2.5 lg:mb-8">
+                <div className="mb-6 lg:mb-8">
+                <div className="grid grid-cols-2 gap-2.5">
                   {(
                     [
                       ["pickup", "Pick up", "at the pharmacy"],
@@ -1318,6 +1324,8 @@ export function BookingFlow() {
                       </button>
                     );
                   })}
+                </div>
+                {errors.delivery && <Err>{errors.delivery}</Err>}
                 </div>
                 <label htmlFor="pharmacySearch" className={qText}>
                   Which pharmacy?
@@ -1489,7 +1497,7 @@ export function BookingFlow() {
                     ["When", b.date ? `${dayLabel(b.date)} · ${b.slotTime}` : ""],
                     ["Doctor", b.provider],
                     ["Reason", b.reason],
-                    ["Pharmacy", b.pharmacy ? `${b.pharmacy} · ${b.delivery === "delivery" ? "Home delivery" : "Pick up"}` : "None"],
+                    ["Pharmacy", b.pharmacy ? [b.pharmacy, deliveryLabel].filter(Boolean).join(" · ") : "None"],
                     ["Reference", reference ? `#${reference}` : ""],
                   ] as const
                 ).map(([k, v], i) => (

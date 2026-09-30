@@ -67,7 +67,8 @@ export type BookingData = {
   province: string;
   postalCode: string;
   // 4 · Pharmacy
-  delivery: "delivery" | "pickup";
+  /** Empty until the patient chooses; only asked when a pharmacy is chosen. */
+  delivery: "" | "delivery" | "pickup";
   pharmacy: string;
   /** The pharmacy picked from the directory (empty when only a name was typed). */
   pharmacyAddress: string;
@@ -111,7 +112,7 @@ export const emptyBooking: BookingData = {
   city: "",
   province: "BC",
   postalCode: "",
-  delivery: "pickup",
+  delivery: "",
   pharmacy: "",
   pharmacyAddress: "",
   pharmacyCity: "",

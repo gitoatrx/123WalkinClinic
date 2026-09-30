@@ -45,7 +45,7 @@ export type BimbleBookingRequest = {
   firstAvailable: boolean;
   /** A pharmacy from the directory, or only a typed name when the directory can't be searched. */
   pharmacy: Partial<BimblePharmacy> & { name: string };
-  delivery: "delivery" | "pickup";
+  delivery: "" | "delivery" | "pickup";
   pharmacyConsent: boolean;
   emergencyContact: { name: string; phone: string; relation: string };
 };
@@ -343,7 +343,7 @@ export const bimble = {
           ...(pharmacy
             ? {
                 pharmacyChoice: "preferred",
-                fulfillment: b.delivery,
+                fulfillment: b.delivery || undefined,
                 prescriptionPharmacyConsent: b.pharmacyConsent,
                 preferredPharmacyName: pharmacy,
                 preferredPharmacyAddress: b.pharmacy.address || undefined,
