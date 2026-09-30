@@ -71,8 +71,9 @@ const QUICK_REASONS: [string, string[]][] = [
   ["Sore throat", ["sore throat", "throat"]],
   ["Cold or flu", ["cold", "flu"]],
   ["Skin or rash", ["skin rash", "rash", "skin"]],
-  ["Refill", ["prescription renewal", "refill", "renewal"]],
-  ["Doctor’s note", ["sick note", "doctor's note", "note"]],
+  ["Anxiety", ["anxiety"]],
+  // Matched on "opioid", not "oat", which "Sore Throat" also contains.
+  ["OAT", ["opioid treatment or substance-use medication support (oat)", "opioid"]],
 ];
 const CODE_LENGTH = 4;
 
