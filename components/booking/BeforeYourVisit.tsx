@@ -327,6 +327,21 @@ function Pictures({
   const gallery = useRef<HTMLInputElement>(null);
   const urls = useRef<string[]>([]);
   useEffect(() => () => urls.current.forEach((u) => URL.revokeObjectURL(u)), []);
+  // "Take a photo" only where it opens a camera: computers ignore `capture` and show a file
+  // picker even with a webcam, so it needs a touch device that has a camera.
+  const [hasCamera, setHasCamera] = useState(false);
+  useEffect(() => {
+    if (!window.matchMedia?.("(pointer: coarse)").matches) return;
+    let off = false;
+    const devices = navigator.mediaDevices?.enumerateDevices?.();
+    if (!devices) return setHasCamera(true);
+    devices
+      .then((list) => !off && setHasCamera(list.some((d) => d.kind === "videoinput")))
+      .catch(() => !off && setHasCamera(true));
+    return () => {
+      off = true;
+    };
+  }, []);
 
   const add = (list: File[]) => {
     if (!list.length) return;
@@ -388,17 +403,19 @@ function Pictures({
         <b className="text-[15px]">Add a photo, if it helps</b>
         <p className="mt-0.5 text-[13px] text-[#4a5a6e]">Good light, close up, in focus. Up to {MAX_PICTURES} pictures.</p>
       </div>
-      <div className="grid grid-cols-2 gap-2.5">
-        <button type="button" onClick={() => camera.current?.click()} disabled={pictures.length >= MAX_PICTURES} className={cn(pick, ring)}>
-          <CameraIcon />
-          Take a photo
-        </button>
+      <div className={cn("grid gap-2.5", hasCamera ? "grid-cols-2" : "grid-cols-1")}>
+        {hasCamera && (
+          <button type="button" onClick={() => camera.current?.click()} disabled={pictures.length >= MAX_PICTURES} className={cn(pick, ring)}>
+            <CameraIcon />
+            Take a photo
+          </button>
+        )}
         <button type="button" onClick={() => gallery.current?.click()} disabled={pictures.length >= MAX_PICTURES} className={cn(pick, ring)}>
           <ImageIcon />
           Choose from gallery
         </button>
       </div>
-      {/* The camera on phones (capture); a file picker elsewhere. */}
+      {/* The camera (capture), on devices that have one. */}
       <input
         ref={camera}
         type="file"

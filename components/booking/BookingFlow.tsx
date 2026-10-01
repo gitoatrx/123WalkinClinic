@@ -406,12 +406,19 @@ export function BookingFlow() {
       const items = dayTimes.filter((s) => slotMinutes(s.time) >= from && slotMinutes(s.time) < p.until);
       from = p.until;
       return { ...p, items };
-    }).filter((g) => g.items.length);
+    });
   }, [slots, shownDate]);
+  const openPeriods = periodGroups.filter((g) => g.items.length);
   /** The part of the day whose times are shown: the one tapped, else the chosen time's. Nothing is picked for the patient. */
   const [viewPeriod, setViewPeriod] = useState("");
-  const chosenPeriod = periodGroups.find((g) => g.items.some((s) => s.date === b.date && s.time === b.slotTime))?.name;
-  const shownPeriod = periodGroups.find((g) => g.name === viewPeriod) ?? periodGroups.find((g) => g.name === chosenPeriod);
+  const chosenPeriod = openPeriods.find((g) => g.items.some((s) => s.date === b.date && s.time === b.slotTime))?.name;
+  const shownPeriod = openPeriods.find((g) => g.name === viewPeriod) ?? openPeriods.find((g) => g.name === chosenPeriod);
+  /** "Choose afternoon …" — names only the parts of the day that have open times. */
+  const periodHint = (() => {
+    const names = openPeriods.map((g) => g.name.toLowerCase());
+    const list = names.length > 1 ? `${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}` : names[0];
+    return list ? `Choose ${list} to see open times.` : "";
+  })();
 
 
   // ---- suggestions -------------------------------------------------------------------------------
@@ -1050,12 +1057,6 @@ export function BookingFlow() {
   const copy = step === "booked" ? null : COPY[step];
 
   /** Enter the texted code right where the phone number is (no separate screen). */
-  const waitBox = waiting && (
-    <div role="status" className="flex items-center gap-3 rounded-2xl bg-[#fff7e3] px-4 py-3.5 text-[15px] font-semibold text-[#5c4400]">
-      <span className="size-5 shrink-0 animate-spin rounded-full border-[2.5px] border-[#e8c46a] border-t-[#14243a]" aria-hidden="true" />
-      {waiting}
-    </div>
-  );
   const codePanel = otp && (
     <div>
       <span className="mb-2 block text-xs font-bold text-[#4a5a6e] lg:text-[13px]">
@@ -1541,29 +1542,35 @@ export function BookingFlow() {
                           </div>
                           {!shownDate && <p className="text-sm text-[#4a5a6e]">Choose a date to see open times.</p>}
                           {shownDate && (
-                            <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${periodGroups.length}, minmax(0, 1fr))` }}>
+                            <div className="grid grid-cols-3 gap-2">
                               {periodGroups.map((g) => {
                                 const on = shownPeriod?.name === g.name;
+                                const empty = !g.items.length;
                                 return (
                                   <button
                                     key={g.name}
                                     type="button"
                                     aria-pressed={on}
+                                    disabled={empty}
                                     onClick={() => setViewPeriod(g.name)}
-                                    style={on ? { backgroundColor: g.color, borderColor: g.color } : { borderColor: `${g.color}55` }}
-                                    className={cn("flex h-[84px] min-w-0 flex-col items-center justify-center gap-1 rounded-xl border-[1.5px] lg:h-[92px]", on ? "text-white" : "bg-white", ring)}
+                                    style={empty ? undefined : on ? { backgroundColor: g.color, borderColor: g.color } : { borderColor: `${g.color}55` }}
+                                    className={cn(
+                                      "flex h-[84px] min-w-0 flex-col items-center justify-center gap-1 rounded-xl border-[1.5px] lg:h-[92px]",
+                                      empty ? "cursor-not-allowed border-[#e1e8ee] bg-[#f5f7f9] text-[#9aa7b5]" : on ? "text-white" : "bg-white",
+                                      ring,
+                                    )}
                                   >
-                                    <PeriodIcon name={g.name} color={on ? undefined : g.color} />
+                                    <PeriodIcon name={g.name} color={on ? undefined : empty ? "#b4bfca" : g.color} />
                                     <span className="text-sm font-bold lg:text-[15px]">{g.name}</span>
-                                    <span className={cn("text-xs font-medium", on ? "text-white/85" : "text-[#4a5a6e]")}>
-                                      {g.items.length} {g.items.length === 1 ? "slot" : "slots"}
+                                    <span className={cn("text-xs font-medium", on ? "text-white/85" : empty ? "text-[#9aa7b5]" : "text-[#4a5a6e]")}>
+                                      {empty ? "No slots" : `${g.items.length} ${g.items.length === 1 ? "slot" : "slots"}`}
                                     </span>
                                   </button>
                                 );
                               })}
                             </div>
                           )}
-                          {shownDate && !shownPeriod && <p className="text-sm text-[#4a5a6e]">Choose morning, afternoon or evening.</p>}
+                          {shownDate && !shownPeriod && periodHint && <p className="text-sm text-[#4a5a6e]">{periodHint}</p>}
                           {shownPeriod && (
                             <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
                               {shownPeriod.items.map((s) => {
@@ -1726,7 +1733,7 @@ export function BookingFlow() {
                   </p>
                 )}
               </div>
-              {waiting ? waitBox : codePanel}
+              {!waiting && codePanel}
             </div>
           )}
 
@@ -2169,7 +2176,7 @@ export function BookingFlow() {
               step === "booked" ? "lg:mt-0 lg:pt-6" : "lg:pt-10",
             )}
           >
-            {step === 7 && (waiting ? <div className="mb-4">{waitBox}</div> : otp && <div className="mb-4">{codePanel}</div>)}
+            {step === 7 && !waiting && otp && <div className="mb-4">{codePanel}</div>}
             {step === "booked" ? (
               <div className="flex flex-col gap-2.5 lg:flex-row lg:justify-between">
                 {b.date && (
