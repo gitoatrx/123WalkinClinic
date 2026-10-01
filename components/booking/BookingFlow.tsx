@@ -3,10 +3,11 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type ReactNode } from "react";
 import { AllergyInput } from "@/components/booking/AllergyInput";
+import { BeforeYourVisit } from "@/components/booking/BeforeYourVisit";
 import { Combobox, useSearch } from "@/components/booking/Combobox";
 import { Dropdown } from "@/components/booking/Dropdown";
 import { Logo } from "@/components/Logo";
-import { CalendarIcon, CheckIcon, ChevronDownIcon, XIcon } from "@/components/icons";
+import { CalendarIcon, CheckIcon, XIcon } from "@/components/icons";
 import {
   bimble,
   BimbleError,
@@ -16,26 +17,30 @@ import {
   type BimblePharmacy,
   type BimbleReason,
   type BimbleSlot,
+  type BimbleVisit,
   type BimbleVisitType,
 } from "@/lib/bimble";
 import {
   availableDates,
   availableTimes,
   calendarFile,
+  capitalizeName,
   clinicLocation,
-  dayLabel,
+  dateParts,
   dobError,
+  dobLabel,
   dobToIso,
   emptyBooking,
-  formatDob,
   formatPhone,
-  phnError,
+  genderOptions,
+  longDate,
   methodLabel,
   methods,
-  methodShort,
+  MONTHS,
+  phnError,
   provinces,
   relationOptions,
-  sexOptions,
+  shortDate,
   timeLabel,
   type BookingData,
 } from "@/lib/booking";
@@ -43,28 +48,31 @@ import { site } from "@/lib/site";
 import { cn } from "@/lib/ui";
 
 /**
- * Booking, "Short & Friendly": five short steps — Your visit → Find your record (a code is texted
- * to the cell phone and entered right below it) → Your details → Pharmacy → Your health → Booked. Phones get a navy header and
- * a white sheet; wide screens a navy side panel listing the steps.
+ * Booking, the same flow as Bimble's own: seven short steps — Your visit (reason, Virtual or In person)
+ * → When (As soon as possible, or a Preferred time) → Find your record (a code is texted to the cell phone
+ * and entered right below it) → Your details → Pharmacy → Your health → Review → Booked. The patient
+ * never picks a doctor: the booking goes to the clinic, which assigns one. Phones get a navy header
+ * and a white sheet; wide screens a navy side panel listing the steps.
  *
- * Live mode (Bimble connected): reasons, doctors and open times come from the clinic's Bimble
- * schedule; after the code, Bimble checks the health card / email and date of birth against the
- * verified phone (a returning patient must match their record, and their details are filled in);
- * "Book" books the appointment into the clinic in Bimble. Otherwise it is a demo: times are
- * simulated and nothing is sent anywhere.
+ * Live mode (Bimble connected): reasons and open times come from the clinic's Bimble schedule;
+ * after the code, Bimble checks the health card / email and date of birth against the verified
+ * phone (a returning patient must match their record, and their details are filled in); "Book"
+ * sends the booking to the clinic in Bimble with no doctor, and the clinic assigns one. Otherwise it is a demo: times are simulated and nothing is sent anywhere.
  */
 
-type Step = 1 | 2 | 3 | 4 | 5 | "booked";
+type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7 | "booked";
 type Errors = Record<string, string>;
 
-const STEPS = ["Your visit", "Find your record", "Your details", "Pharmacy", "Your health"];
+const STEPS = ["Your visit", "Doctor & time", "Find your record", "Your details", "Pharmacy", "Your health", "Review"];
 /** Phone header title and subtitle, and side-panel headline and line, per step. */
 const COPY: Record<Exclude<Step, "booked">, { title: string; sub: string; headline: string; line: string }> = {
-  1: { title: "Book a visit", sub: "Step 1 of 5 · Your visit", headline: "See a doctor today.", line: "Five short steps. About two minutes." },
-  2: { title: "Find your record", sub: "Step 2 of 5 · Find your record", headline: "Find your record.", line: "Just enough to find your record." },
-  3: { title: "Your details", sub: "Step 3 of 5 · filled in if you’ve visited before", headline: "Your details.", line: "Been here before? We’ve filled these in — just check them." },
-  4: { title: "Your pharmacy", sub: "Step 4 of 5 · where prescriptions go", headline: "Your pharmacy.", line: "Where should your prescription go?" },
-  5: { title: "Your health", sub: "Step 5 of 5 · last one", headline: "Last step.", line: "Allergies, notes and an emergency contact — then you’re booked." },
+  1: { title: "Book a visit", sub: "Step 1 of 7 · Your visit", headline: "See a doctor today.", line: "Seven short steps. About two minutes." },
+  2: { title: "Doctor & time", sub: "Step 2 of 7 · Doctor & time", headline: "Choose your doctor.", line: "Then pick a date and time that suits you." },
+  3: { title: "Find your record", sub: "Step 3 of 7 · Find your record", headline: "Find your record.", line: "Just enough to find your record." },
+  4: { title: "Your details", sub: "Step 4 of 7 · filled in if you’ve visited before", headline: "Your details.", line: "Been here before? We’ve filled these in — just check them." },
+  5: { title: "Your pharmacy", sub: "Step 5 of 7 · where prescriptions go", headline: "Your pharmacy.", line: "Where should your prescription go?" },
+  6: { title: "Your health", sub: "Step 6 of 7 · allergies and notes", headline: "Almost done.", line: "Allergies, notes and an emergency contact." },
+  7: { title: "Review", sub: "Step 7 of 7 · check and book", headline: "Everything look right?", line: "Check your details, then book." },
 };
 /** Everyday picks under the reason box, matched to reasons in Bimble's list. */
 const QUICK_REASONS: [string, string[]][] = [
@@ -75,42 +83,59 @@ const QUICK_REASONS: [string, string[]][] = [
   // Matched on "opioid", not "oat", which "Sore Throat" also contains.
   ["OAT", ["opioid treatment or substance-use medication support (oat)", "opioid"]],
 ];
+/** The preview's doctors (with Bimble connected, the clinic's doctors who see the chosen reason). */
+const DEMO_DOCTORS: BimbleDoctor[] = [
+  { id: 1, name: "Dr. Sarah Chen" },
+  { id: 2, name: "Dr. Amrit Gill" },
+  { id: 3, name: "Dr. Michael Ross" },
+];
+/** The reason list's last entry: describe it in your own words. */
+const OTHER_KEY = "__something-else";
 const CODE_LENGTH = 4;
+const DRAFT_KEY = "123walkin-booking-draft";
+/** Parts of the day for open times, with Bimble's colours. */
+const PERIODS = [
+  { name: "Morning", until: 12 * 60, color: "#f59e0b" },
+  { name: "Afternoon", until: 17 * 60, color: "#f97316" },
+  { name: "Evening", until: 24 * 60, color: "#6366f1" },
+];
 
 // ---- styles (the design's navy, gold and soft grey) ------------------------------------------
 const qText = "mb-2.5 block text-[15px] font-extrabold text-[#14243a] lg:mb-3 lg:text-base";
 const field =
   "h-[54px] w-full rounded-[14px] border-0 bg-[#f0f4f7] px-4 text-base text-[#14243a] outline-none placeholder:text-[#6b7a8c] focus:shadow-[inset_0_0_0_2px_#14243a] lg:h-14 lg:px-[18px]";
 const boxInput = "w-full border-0 bg-transparent p-0 text-base font-semibold text-[#14243a] outline-none placeholder:font-medium placeholder:text-[#8a9aac]";
+/** A grey field as tall as a labelled box (date of birth). */
+const tallField =
+  "h-[62px] w-full rounded-[14px] border-0 bg-[#f0f4f7] px-4 text-base font-semibold text-[#14243a] outline-none placeholder:font-medium placeholder:text-[#8a9aac] focus:shadow-[inset_0_0_0_2px_#14243a] lg:h-16";
 const primary =
   "inline-flex h-14 items-center justify-center gap-2 rounded-2xl bg-[#14243a] px-5 text-base font-bold text-white transition-colors hover:bg-[#1f3552] disabled:opacity-60 lg:h-[58px] lg:px-10";
 const gold = "bg-[#c18700] text-[17px] font-extrabold text-[#14243a] hover:bg-[#d09400]";
 const ring = "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#14243a]";
-/** A time chip: gold with a navy ring when chosen. */
-const timeChip = (on: boolean) =>
+const invalidRing = "shadow-[inset_0_0_0_2px_#c92a2a]";
+/** A choice card (visit type, pick up / delivery): gold when chosen. */
+const tile = (on: boolean) =>
   cn(
-    "h-[42px] shrink-0 rounded-full px-3 text-sm font-bold transition-colors sm:px-3.5 lg:h-[46px] lg:px-[18px] lg:text-[15px]",
-    on ? "bg-[#fbecc4] text-[#14243a] shadow-[inset_0_0_0_2px_#14243a]" : "bg-[#f0f4f7] text-[#14243a] hover:bg-[#e4eaef]",
-    ring,
-  );
-const PERIODS = [
-  { name: "Morning", until: 12 * 60 },
-  { name: "Afternoon", until: 17 * 60 },
-  { name: "Evening", until: 24 * 60 },
-];
-const chip = (on: boolean) =>
-  cn(
-    "h-[42px] shrink-0 rounded-full px-3.5 text-sm font-bold transition-colors lg:h-[46px] lg:px-[18px] lg:text-[15px]",
-    on ? "bg-[#14243a] text-white" : "bg-[#f0f4f7] text-[#14243a] hover:bg-[#e4eaef]",
+    "flex min-w-0 flex-col items-start gap-1 rounded-[18px] border-2 px-4 py-3.5 text-left transition-colors lg:px-5 lg:py-4",
+    on ? "border-[#c18700] bg-[#fbecc4]" : "border-[#e1e8ee] bg-white hover:border-[#9fb0c2]",
     ring,
   );
 
 const digits = (s: string) => s.replace(/\D/g, "");
 const validEmail = (s: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim());
 const validPostalCode = (s: string) => /^[ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z][ -]?\d[ABCEGHJ-NPRSTV-Z]\d$/i.test(s.trim());
-/** In clinic is a Bimble "clinic" visit; video and phone are "virtual". */
-const visitTypeFor = (method: string): BimbleVisitType => (method === "in-clinic" ? "clinic" : "virtual");
+/** City names: letters, spaces, apostrophes, hyphens and periods ("St. Albert"). */
+const cleanCity = (s: string) => {
+  const v = s.replace(/[^\p{L}\s'’.-]/gu, "").replace(/\s{2,}/g, " ").replace(/^\s+/, "");
+  return v.charAt(0).toUpperCase() + v.slice(1);
+};
+/** In person is a Bimble "clinic" visit; virtual is "virtual". */
+/** Every visit is virtual. */
+const visitTypeFor = (): BimbleVisitType => "virtual";
+/** A doctor's note or a form: no prescription, so no pharmacy is asked for (Bimble's "Doctor's note or form"). */
+const isNoteOrForm = (reason: string) => /\b(note|notes|form|forms|letter|certificate)\b/i.test(reason);
 const errorText = (e: unknown, fallback: string) => (e instanceof BimbleError ? e.message : fallback);
+const tooCloseOrTaken = (status: number, message: string) => status === 409 || (status === 422 && /past|too close/i.test(message));
 
 export function BookingFlow() {
   const live = bimble.live;
@@ -122,36 +147,95 @@ export function BookingFlow() {
   const [apiError, setApiError] = useState("");
   const [busy, setBusy] = useState(false);
   const [showEmergency, setShowEmergency] = useState(false);
-  const [moreTimes, setMoreTimes] = useState(false);
   const [pharmacyQuery, setPharmacyQuery] = useState("");
   const top = useRef<HTMLDivElement>(null);
 
   // What Bimble knows about the clinic
+  /** Every doctor the clinic offers online: any of them can be booked for any reason. */
   const [allDoctors, setAllDoctors] = useState<BimbleDoctor[]>([]);
-  const [doctors, setDoctors] = useState<BimbleDoctor[]>([]);
-  /** The reason (service) the doctors list was loaded for; null = none loaded yet, serviceId null = every doctor. */
-  const [doctorsFor, setDoctorsFor] = useState<{ serviceId: number | null } | null>(null);
+  /** The clinic's doctors have loaded (they're asked for once, with no reason attached). */
+  const [doctorsLoaded, setDoctorsLoaded] = useState(false);
   const [visitTypes, setVisitTypes] = useState<string[]>(["virtual", "walkin"]);
   const [reasons, setReasons] = useState<BimbleReason[]>([]);
   const [slots, setSlots] = useState<BimbleSlot[] | null>(null);
   const [slotsVersion, setSlotsVersion] = useState(0);
   const [reference, setReference] = useState("");
+  /** After booking: the token and appointment for "Before your visit". */
+  const [booked, setBooked] = useState<{ token: string; appointmentId: number | null }>({ token: "", appointmentId: null });
   // Phone verification: the code texted to the patient, what it is for, and the token it unlocks.
-  const [otp, setOtp] = useState<{ sessionId: number; maskedPhone: string; devCode: string } | null>(null);
+  const [otp, setOtp] = useState<{ sessionId: number; maskedPhone: string; devCode: string; phone: string } | null>(null);
+  /** A code is being texted in the background (step 3 sends it as soon as the cell phone is complete). */
+  const [sending, setSending] = useState(false);
+  /** Guards against a second text while one is on its way (state updates arrive a render late). */
+  const sendingNow = useRef(false);
+  /** The visit Bimble last saved (and holds), per verification: unchanged, Book doesn't send it again. */
+  const [savedVisit, setSavedVisit] = useState("");
+  /** "Any doctor" times Bimble refused (taken, too close, another booking of theirs): skipped. */
+  const [rejected, setRejected] = useState<string[]>([]);
+  /** Doctors or reasons failed to load: offer to try again. */
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [loadTry, setLoadTry] = useState(0);
+  /** The latest booking data, for checks after an await. */
+  const latestB = useRef(b);
+  latestB.current = b;
+  /** Shown while the code, the record and the visit are checked; the step moves on by itself after. */
+  const [waiting, setWaiting] = useState("");
   const [code, setCode] = useState("");
-  const [verifyFor, setVerifyFor] = useState<"identity" | "book">("identity");
   const [token, setToken] = useState<{ phone: string; value: string } | null>(null);
   const [welcome, setWelcome] = useState("");
   const [savedPharmacy, setSavedPharmacy] = useState<BimblePharmacy | null>(null);
+  // "Something else": Bimble matches the patient's words to a reason.
+  const [matching, setMatching] = useState(false);
+  const [matchedFor, setMatchedFor] = useState("");
+  const [matchOptions, setMatchOptions] = useState<{ reason: string; serviceId: number }[]>([]);
 
+  /** Fields whose message shows under another name (the three date of birth boxes share one). */
+  const errorKey = (k: string) => (k.startsWith("dob") ? "dob" : k === "otherText" ? "reason" : k);
   const set = (patch: Partial<BookingData>) => {
     setB((prev) => ({ ...prev, ...patch }));
     setErrors((e) => {
       const next = { ...e };
-      for (const k of Object.keys(patch)) delete next[k];
+      for (const k of Object.keys(patch)) delete next[errorKey(k)];
       return next;
     });
   };
+
+  /** The reason is a doctor's note or a form, so the Pharmacy step is skipped. */
+  const noPharmacy = isNoteOrForm(b.reasonBimble || b.reason || b.otherText);
+
+  // ---- a refresh keeps what was entered (never the health card number) --------------------------
+  const restored = useRef(false);
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(DRAFT_KEY) ?? "null") as Partial<BookingData> | null;
+      if (saved) {
+        setB({
+          ...emptyBooking,
+          ...saved,
+          // Times move on, and the visit types changed: choose them again.
+          method: methods.some((m) => m.id === saved.method) ? saved.method! : "virtual",
+          date: "",
+          time: null,
+          slotTime: "",
+          slotDoctorId: null,
+          cardNumber: "",
+          pharmacyConsent: false,
+        });
+      }
+    } catch {
+      // No saved draft, or storage is blocked: start fresh.
+    }
+    restored.current = true;
+  }, []);
+  useEffect(() => {
+    if (!restored.current) return;
+    try {
+      if (step === "booked") sessionStorage.removeItem(DRAFT_KEY);
+      else sessionStorage.setItem(DRAFT_KEY, JSON.stringify({ ...b, cardNumber: "" }));
+    } catch {
+      // Storage is blocked: the form still works, it just won't survive a refresh.
+    }
+  }, [b, step]);
 
   // ---- Bimble: doctors, reasons, open times ----------------------------------------------------
   useEffect(() => {
@@ -162,53 +246,30 @@ export function BookingFlow() {
       .then((r) => {
         if (off) return;
         setAllDoctors(r.doctors);
-        setDoctors(r.doctors);
-        setDoctorsFor({ serviceId: null });
+        setDoctorsLoaded(true);
         setVisitTypes(r.visitTypes);
-      })
-      .catch((e) => !off && setApiError(errorText(e, "Could not load the clinic’s doctors.")));
-    bimble
-      .reasons()
-      .then((r) => !off && setReasons(r))
-      .catch((e) => !off && setApiError(errorText(e, "Could not load the list of reasons.")));
-    return () => {
-      off = true;
-    };
-  }, [live]);
-
-  // As on Bimble's own booking pages, only doctors who see the chosen reason are offered.
-  useEffect(() => {
-    if (!live) return;
-    if (b.reasonServiceId === null) {
-      setDoctors(allDoctors);
-      if (allDoctors.length) setDoctorsFor({ serviceId: null });
-      return;
-    }
-    const serviceId = b.reasonServiceId;
-    let off = false;
-    bimble
-      .doctors({ serviceId, label: b.reasonBimble || b.reason.trim() })
-      .then((r) => {
-        if (off) return;
-        setDoctors(r.doctors);
-        setDoctorsFor({ serviceId });
       })
       .catch((e) => {
         if (off) return;
-        setDoctors([]);
-        setDoctorsFor({ serviceId });
+        setLoadFailed(true);
         setApiError(errorText(e, "Could not load the clinic’s doctors."));
+      });
+    bimble
+      .reasons()
+      .then((r) => !off && setReasons(r))
+      .catch((e) => {
+        if (off) return;
+        setLoadFailed(true);
+        setApiError(errorText(e, "Could not load the list of reasons."));
       });
     return () => {
       off = true;
     };
-    // The label only changes together with the service it belongs to.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [live, b.reasonServiceId, allDoctors]);
+  }, [live, loadTry]);
 
   // The clinic decides which visit types can be booked online.
   const offeredMethods = useMemo(
-    () => (live ? methods.filter((m) => visitTypes.includes(m.id === "in-clinic" ? "walkin" : "virtual")) : methods),
+    () => (live ? methods.filter(() => visitTypes.includes("virtual")) : methods),
     [live, visitTypes],
   );
   useEffect(() => {
@@ -216,28 +277,29 @@ export function BookingFlow() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [offeredMethods]);
 
-  /** The doctors list belongs to the chosen reason (not the previous one, while the new list loads). */
-  const doctorsReady = !live || (doctorsFor !== null && doctorsFor.serviceId === b.reasonServiceId);
-  /** A reason is chosen (from Bimble's list when live), so the doctors who see it are known. */
-  const reasonChosen = live ? b.reasonServiceId !== null : b.reason.trim() !== "";
-  /** Open times are shown only once the reason and the visit type are chosen, so they don't change under the patient. */
-  const readyForTimes = reasonChosen && b.method !== "";
+  const doctorsReady = !live || doctorsLoaded;
+  /** A reason is chosen (from Bimble's list, or matched from the patient's words, when live). */
+  const reasonChosen = live ? b.reasonServiceId !== null : b.reasonOther ? b.otherText.trim().length >= 3 : b.reason.trim() !== "";
+  /** The doctors the patient can choose from: every doctor, whatever the reason (no specialty filter). */
+  const doctorChoices = live ? allDoctors : DEMO_DOCTORS;
+  /** Open times are shown for the chosen doctor, once the reason and the visit type are chosen. */
+  const readyForTimes = reasonChosen && b.method !== "" && b.doctorMode === "choose" && b.doctorId !== null;
 
-  // Open times over the next days, for the chosen doctor (or every doctor) and visit type.
+  // The chosen doctor's open times over the next days (from their schedule, minus taken times).
   useEffect(() => {
     if (!readyForTimes) {
       setSlots(null);
       return;
     }
     if (!live) {
-      setSlots(availableDates().flatMap((date) => availableTimes(date, b.method).map((t) => ({ date, time: timeLabel(t), doctorId: 0 }))));
+      setSlots(availableDates().flatMap((date) => availableTimes(date, `${b.method}-${b.doctorId}`).map((t) => ({ date, time: timeLabel(t), doctorId: b.doctorId ?? 0 }))));
       return;
     }
     if (!doctorsReady) {
       setSlots(null);
       return;
     }
-    const ids = b.providerId === "any" ? doctors.map((d) => d.id) : [Number(b.providerId)];
+    const ids = b.doctorId !== null ? [b.doctorId] : [];
     if (!ids.length) {
       setSlots(allDoctors.length ? [] : null);
       return;
@@ -245,7 +307,7 @@ export function BookingFlow() {
     let off = false;
     setSlots(null);
     bimble
-      .slots(ids, visitTypeFor(b.method))
+      .slots(ids, visitTypeFor())
       .then((s) => !off && setSlots(s))
       .catch((e) => {
         if (off) return;
@@ -256,34 +318,100 @@ export function BookingFlow() {
       off = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [live, readyForTimes, b.method, b.providerId, doctors, doctorsReady, allDoctors.length, slotsVersion]);
+  }, [live, readyForTimes, b.method, b.doctorId, doctorsReady, allDoctors.length, slotsVersion]);
 
-  /** No doctor at the clinic sees the chosen reason online. */
-  const noDoctors = live && doctorsReady && !doctors.length;
-  const doctorName = (id: number | null) => (doctors.find((d) => d.id === id) ?? allDoctors.find((d) => d.id === id))?.name ?? "";
-  const pickSlot = (s: BimbleSlot) =>
-    set({
-      date: s.date,
-      time: slotMinutes(s.time),
-      slotTime: s.time,
-      slotDoctorId: s.doctorId,
-      provider: b.providerId === "any" ? doctorName(s.doctorId) || "First available" : b.provider,
-    });
-
-  // The patient picks the time. One that is no longer open (another doctor, visit type or reason) is cleared.
+  // "Any doctor · soonest first": every doctor's open times, and the soonest is booked as is.
+  const [anySlots, setAnySlots] = useState<BimbleSlot[] | null | undefined>(undefined);
   useEffect(() => {
-    if (!b.slotTime) return;
-    const open = (slots ?? []).some((s) => s.date === b.date && s.time === b.slotTime && s.doctorId === b.slotDoctorId);
-    if (!open) set({ date: "", time: null, slotTime: "", slotDoctorId: null });
+    if (!reasonChosen || !b.method) return;
+    if (!live) {
+      setAnySlots(
+        availableDates()
+          .flatMap((date) => DEMO_DOCTORS.flatMap((d) => availableTimes(date, `${b.method}-${d.id}`).map((t) => ({ date, t, doctorId: d.id }))))
+          .sort((x, y) => x.date.localeCompare(y.date) || x.t - y.t)
+          .map((x) => ({ date: x.date, time: timeLabel(x.t), doctorId: x.doctorId })),
+      );
+      return;
+    }
+    if (!doctorsReady) return;
+    if (!allDoctors.length) return setAnySlots(null);
+    let off = false;
+    setAnySlots(undefined);
+    bimble
+      .slots(
+        allDoctors.map((d) => d.id),
+        visitTypeFor(),
+      )
+      .then((s) => !off && setAnySlots(s))
+      .catch(() => !off && setAnySlots(null));
+    return () => {
+      off = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live, reasonChosen, b.method, doctorsReady, allDoctors, slotsVersion]);
+  const slotKey = (s: { date: string; time: string; doctorId: number | null }) => `${s.date}|${s.time}|${s.doctorId}`;
+  /** The soonest time not refused by Bimble; undefined while loading, null when there is none. */
+  const soonest = useMemo(
+    () => (anySlots === undefined ? undefined : anySlots === null ? null : (anySlots.find((s) => !rejected.includes(slotKey(s))) ?? null)),
+    [anySlots, rejected],
+  );
+  /** Remember a refused "Any doctor" time, so the next soonest is offered instead of the same one. */
+  const rejectCurrentAnyTime = () => {
+    const now = latestB.current;
+    if (now.doctorMode === "any" && now.slotTime) setRejected((r) => [...r, slotKey({ date: now.date, time: now.slotTime, doctorId: now.doctorId })]);
+  };
+  const soonestDoctor = (s: BimbleSlot) => doctorChoices.find((d) => d.id === s.doctorId)?.name ?? "";
+  // "Any doctor": the soonest time and its doctor are the booking (kept up to date if it changes).
+  useEffect(() => {
+    if (b.doctorMode !== "any" || soonest === undefined) return;
+    if (soonest === null) {
+      if (b.slotTime) set({ doctorId: null, doctorName: "", date: "", time: null, slotTime: "", slotDoctorId: null });
+      return;
+    }
+    if (b.date === soonest.date && b.slotTime === soonest.time && b.doctorId === soonest.doctorId) return;
+    set({
+      doctorId: soonest.doctorId,
+      doctorName: soonestDoctor(soonest),
+      date: soonest.date,
+      time: slotMinutes(soonest.time),
+      slotTime: soonest.time,
+      slotDoctorId: soonest.doctorId,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [b.doctorMode, soonest]);
+
+  /** The clinic has no doctor taking online bookings. */
+  const noDoctors = live && doctorsReady && !allDoctors.length;
+  const pickSlot = (s: BimbleSlot) => set({ date: s.date, time: slotMinutes(s.time), slotTime: s.time, slotDoctorId: s.doctorId });
+  const clearTime = () => set({ date: "", time: null, slotTime: "", slotDoctorId: null });
+
+  // The patient picks the time. One that is no longer open (another visit type or reason) is cleared.
+  useEffect(() => {
+    if (!b.slotTime || slots === null) return;
+    const open = slots.some((s) => s.date === b.date && s.time === b.slotTime);
+    if (!open) clearTime();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slots]);
 
-  const dates = useMemo(() => [...new Set((slots ?? []).map((s) => s.date))], [slots]);
-  /** The day whose times are shown: the one tapped, else the chosen time's day, else the first open day. */
+  /** Up to a week of open days, as Bimble shows them. */
+  const dates = useMemo(() => [...new Set((slots ?? []).map((s) => s.date))].slice(0, 7), [slots]);
+  /** The day whose times are shown: the one tapped, else the chosen time's day. Nothing is picked for the patient. */
   const [viewDate, setViewDate] = useState("");
-  const shownDate = dates.includes(viewDate) ? viewDate : dates.includes(b.date) ? b.date : (dates[0] ?? "");
-  const dayTimes = useMemo(() => (slots ?? []).filter((s) => s.date === shownDate), [slots, shownDate]);
-  const soonest = slots?.[0];
+  const shownDate = dates.includes(viewDate) ? viewDate : dates.includes(b.date) ? b.date : "";
+  const periodGroups = useMemo(() => {
+    const dayTimes = (slots ?? []).filter((s) => s.date === shownDate);
+    let from = 0;
+    return PERIODS.map((p) => {
+      const items = dayTimes.filter((s) => slotMinutes(s.time) >= from && slotMinutes(s.time) < p.until);
+      from = p.until;
+      return { ...p, items };
+    }).filter((g) => g.items.length);
+  }, [slots, shownDate]);
+  /** The part of the day whose times are shown: the one tapped, else the chosen time's. Nothing is picked for the patient. */
+  const [viewPeriod, setViewPeriod] = useState("");
+  const chosenPeriod = periodGroups.find((g) => g.items.some((s) => s.date === b.date && s.time === b.slotTime))?.name;
+  const shownPeriod = periodGroups.find((g) => g.name === viewPeriod) ?? periodGroups.find((g) => g.name === chosenPeriod);
+
 
   // ---- suggestions -------------------------------------------------------------------------------
   const reasonOptions = useMemo(() => {
@@ -301,7 +429,8 @@ export function BookingFlow() {
           .sort((x, y) => y.hits - x.hits)
           .map((x) => x.r)
       : reasons;
-    return list.slice(0, 50).map((r) => ({ key: `${r.serviceId}:${r.label}`, label: r.label }));
+    const options = list.slice(0, 50).map((r) => ({ key: `${r.serviceId}:${r.label}`, label: r.label }));
+    return words.length ? [...options, { key: OTHER_KEY, label: "Something else: describe it in your own words" }] : options;
   }, [reasons, b.reason]);
   const quickReasons = useMemo(() => {
     if (!live) return QUICK_REASONS.map(([label]) => ({ label, reason: null as BimbleReason | null }));
@@ -317,8 +446,52 @@ export function BookingFlow() {
 
   /** `shown`: the friendly name to put in the field (a quick button's), else Bimble's own. */
   const chooseReason = (r: BimbleReason, shown = r.label) =>
-    // A new reason can change the doctors, so the doctor choice starts over.
-    set({ reason: shown, reasonServiceId: r.serviceId, reasonBimble: r.label, providerId: "any", provider: "First available" });
+    set({ reason: shown, reasonServiceId: r.serviceId, reasonBimble: r.label, reasonOther: false });
+  const startOther = () => {
+    set({ reasonOther: true, reason: "", reasonServiceId: null, reasonBimble: "" });
+    setMatchOptions([]);
+    setTimeout(() => document.getElementById("otherText")?.focus(), 0);
+  };
+
+  /** A match in flight, so a blur and Next share one call (Bimble allows 10 a minute). */
+  const matchInFlight = useRef<{ text: string; promise: Promise<Partial<BookingData> | null> } | null>(null);
+  /** "Something else": match the patient's words to Bimble's list. Returns what was set, or null. */
+  const matchOther = (): Promise<Partial<BookingData> | null> => {
+    const text = b.otherText.trim();
+    if (!live || text.length < 8) return Promise.resolve(null);
+    if (matchedFor === text && b.reasonServiceId !== null) return Promise.resolve({});
+    if (matchInFlight.current?.text === text) return matchInFlight.current.promise;
+    const promise = runMatch(text);
+    matchInFlight.current = { text, promise };
+    void promise.finally(() => {
+      if (matchInFlight.current?.promise === promise) matchInFlight.current = null;
+    });
+    return promise;
+  };
+  const runMatch = async (text: string): Promise<Partial<BookingData> | null> => {
+    setMatching(true);
+    try {
+      const m = await bimble.matchConcern(text);
+      // The patient moved on (picked a listed reason, or changed the words): this answer no longer applies.
+      const now = latestB.current;
+      if (!now.reasonOther || now.otherText.trim() !== text) return null;
+      setMatchedFor(text);
+      if (m.options.length > 1) {
+        setMatchOptions(m.options);
+        setErrors((e) => ({ ...e, reason: "Choose the closest match below." }));
+        return null;
+      }
+      setMatchOptions([]);
+      const patch = { reasonServiceId: m.serviceId, reasonBimble: m.reason };
+      set(patch);
+      return patch;
+    } catch (e) {
+      setErrors((er) => ({ ...er, reason: errorText(e, "We couldn’t match that. Try other words, or pick from the list.") }));
+      return null;
+    } finally {
+      setMatching(false);
+    }
+  };
 
   useEffect(() => {
     top.current?.scrollIntoView({ block: "start" });
@@ -331,42 +504,55 @@ export function BookingFlow() {
   }, [apiError]);
 
   // ---- checks ------------------------------------------------------------------------------------
-  const validate = (s: Step): Errors => {
+  const validate = (s: Step, d: BookingData = b): Errors => {
     const e: Errors = {};
     if (s === 1) {
-      if (!b.method) e.method = "Choose how you would like to meet.";
-      else if (!b.slotTime || b.time === null) e.time = "Choose a time.";
-      if (!b.reason.trim()) e.reason = "Tell us what the visit is for.";
+      if (d.reasonOther) {
+        if (d.otherText.trim().length < (live ? 8 : 3)) e.reason = "Tell us a little more about what you need help with.";
+        else if (live && d.reasonServiceId === null) e.reason = matchOptions.length ? "Choose the closest match below." : "We’re matching your reason. Try Next again.";
+      } else if (!d.reason.trim()) e.reason = "Tell us what the visit is for.";
       // Bimble books a reason from its own list, so the doctors and service match.
-      else if (live && b.reasonServiceId === null) e.reason = "Choose the closest match from the list.";
+      else if (live && d.reasonServiceId === null) e.reason = "Choose the closest match from the list.";
+      if (!d.method) e.method = "The clinic isn’t taking virtual bookings online right now. Please call the clinic.";
     }
     if (s === 2) {
-      if (b.hasCard) {
-        const phn = phnError(b.cardNumber);
-        if (phn) e.cardNumber = digits(b.cardNumber) ? phn : "Enter your 10-digit BC health card number.";
-      } else if (!validEmail(b.email)) e.email = "Enter a valid email address.";
-      const dob = dobError(b.dob);
-      if (dob) e.dob = dob;
-      if (digits(b.cellPhone).length !== 10) e.cellPhone = "Enter a 10-digit cell phone number that can receive texts.";
+      if (!d.doctorMode) e.doctorMode = "Choose any doctor, or a doctor of your choice.";
+      else if (d.doctorMode === "any") {
+        if (!d.slotTime || d.doctorId === null)
+          e.doctorMode = soonest === undefined ? "Finding the next available time…" : "No open times right now. Choose a doctor, or call the clinic.";
+      } else if (d.doctorId === null) e.doctorId = "Choose a doctor.";
+      else if (!d.slotTime || d.time === null) e.time = "Choose a time.";
     }
     if (s === 3) {
-      if (!b.firstName.trim()) e.firstName = "Enter your first name.";
-      if (!b.lastName.trim()) e.lastName = "Enter your last name.";
-      if (!b.sex) e.sex = "Choose one.";
-      if (!b.addressLine.trim()) e.addressLine = "Enter your street address.";
-      if (!b.city.trim()) e.city = "Enter your city.";
-      if (!provinces.includes(b.province)) e.province = "Choose your province.";
-      if (!b.postalCode.trim()) e.postalCode = "Enter your postal code.";
-      else if (!validPostalCode(b.postalCode)) e.postalCode = "Enter a valid postal code, e.g. V2T 4V1.";
+      if (d.hasCard) {
+        const phn = phnError(d.cardNumber);
+        if (phn) e.cardNumber = digits(d.cardNumber) ? phn : "Enter your 10-digit BC health card number.";
+      } else if (!validEmail(d.email)) e.email = "Enter a valid email address.";
+      const dob = dobError(d.dobMonth, d.dobDay, d.dobYear);
+      if (dob) e.dob = dob;
+      if (digits(d.cellPhone).length !== 10) e.cellPhone = "Enter a 10-digit cell phone number that can receive texts.";
     }
-    if (s === 4 && b.pharmacy.trim() && !b.delivery) e.delivery = "Choose pick up or home delivery.";
-    if (s === 4 && b.pharmacy.trim() && !b.pharmacyConsent) e.pharmacyConsent = "Tick the box to send prescriptions to this pharmacy, or skip the pharmacy.";
-    if (s === 5) {
-      if (b.emergencyName.trim() || b.emergencyPhone.trim() || b.emergencyRelation) {
-        if (!b.emergencyName.trim()) e.emergencyName = "Enter their name.";
-        if (digits(b.emergencyPhone).length !== 10) e.emergencyPhone = "Enter a 10-digit phone number.";
+    if (s === 4) {
+      if (!d.firstName.trim()) e.firstName = "First name is required.";
+      if (!d.lastName.trim()) e.lastName = "Last name is required.";
+      if (!d.gender) e.gender = "Please select a gender option.";
+      if (!d.addressLine.trim()) e.addressLine = "Enter your street address.";
+      if (!d.city.trim()) e.city = "Enter your city.";
+      if (!provinces.includes(d.province)) e.province = "Choose your province.";
+      if (!d.postalCode.trim()) e.postalCode = "Enter your postal code.";
+      else if (!validPostalCode(d.postalCode)) e.postalCode = "Enter a valid postal code, e.g. V2T 4V1.";
+    }
+    if (s === 5 && !isNoteOrForm(d.reasonBimble || d.reason || d.otherText)) {
+      if (!d.pharmacyChoice) e.pharmacyChoice = "Choose Bimble Pharmacy or your own pharmacy.";
+      else if (d.pharmacyChoice === "own") {
+        if (!d.delivery) e.delivery = "Choose pick up or delivery.";
+        if (!d.pharmacy.trim()) e.pharmacy = "Choose a pharmacy from the list.";
       }
-      if (!b.terms) e.terms = "Please confirm to book.";
+      if (d.pharmacyChoice && !d.pharmacyConsent) e.pharmacyConsent = "Please provide consent before booking this appointment.";
+    }
+    if (s === 6 && (d.emergencyName.trim() || d.emergencyPhone.trim() || d.emergencyRelation)) {
+      if (!d.emergencyName.trim()) e.emergencyName = "Enter their name.";
+      if (digits(d.emergencyPhone).length !== 10) e.emergencyPhone = "Enter a 10-digit phone number.";
     }
     return e;
   };
@@ -375,34 +561,71 @@ export function BookingFlow() {
 
   // ---- phone verification + identity ------------------------------------------------------------
   const verifiedToken = () => (token && token.phone === b.cellPhone ? token.value : "");
+  const dobIso = dobToIso(b.dobMonth, b.dobDay, b.dobYear);
   /** What Bimble last matched to the verified phone; unchanged, there is nothing to check again. */
-  const identityKey = () => [b.cellPhone, b.hasCard ? digits(b.cardNumber) : b.email.trim().toLowerCase(), dobToIso(b.dob)].join("|");
+  const identityKey = () => [b.cellPhone, b.hasCard ? digits(b.cardNumber) : b.email.trim().toLowerCase(), dobIso].join("|");
   const [checkedIdentity, setCheckedIdentity] = useState("");
 
-  const sendCode = async (purpose: "identity" | "book") => {
+  /** Identity and visit, as last confirmed by Bimble for a verification. */
+  const identityFor = (accessToken: string) => `${accessToken}|${identityKey()}`;
+  const visitKey = (accessToken: string) => [accessToken, b.doctorId, b.date, b.slotTime, b.reasonServiceId, reasonForBimble()].join("|");
+
+  const sendCode = async () => {
     const res = await bimble.startPhone(b.cellPhone);
-    setOtp({ sessionId: res.intake_session_id, maskedPhone: res.masked_phone, devCode: res.dev_otp ?? "" });
+    setOtp({ sessionId: res.intake_session_id, maskedPhone: res.masked_phone, devCode: res.dev_otp ?? "", phone: b.cellPhone });
     setCode("");
-    setVerifyFor(purpose);
     setErrors({});
+  };
+
+  const reasonForBimble = () => b.reasonBimble || b.reason.trim() || b.otherText.trim();
+  const visitFor = (): BimbleVisit =>
+({ visitType: visitTypeFor(), doctorId: b.doctorId ?? 0, date: b.date, time: b.slotTime });
+
+  /**
+   * Saves the visit for the verified patient so Bimble checks the time now. A time that is no
+   * longer bookable sends the patient back to choose another; false then.
+   */
+  const saveVisit = async (accessToken: string) => {
+    if (!live) return true;
+    try {
+      await bimble.saveVisit(accessToken, { reason: reasonForBimble(), serviceId: b.reasonServiceId, visit: visitFor() });
+      setSavedVisit(visitKey(accessToken));
+      return true;
+    } catch (e) {
+      if (e instanceof BimbleError && e.status === 401) throw e;
+      const status = e instanceof BimbleError ? e.status : 0;
+      const message = errorText(e, "That time is no longer open. Please choose another time.");
+      setApiError(message);
+      if (tooCloseOrTaken(status, message)) {
+        rejectCurrentAnyTime();
+        clearTime();
+        setSlotsVersion((v) => v + 1);
+      }
+      setStep(2);
+      return false;
+    }
   };
 
   /**
    * Bimble checks the health card / email and date of birth against the verified phone. A returning
    * patient's saved details fill in the empty fields; a mismatch goes back to step 2 on the right field.
    */
-  const checkIdentity = async (accessToken: string) => {
+  /**
+   * Bimble matches the health card / email and date of birth to the verified phone and returns the
+   * saved record; empty fields are filled in from it. False (with the problem shown on step 3) when
+   * the details don't match. A 401 (verification expired) is thrown.
+   */
+  const matchRecord = async (accessToken: string) => {
     try {
-      const known = await bimble.checkIdentity(accessToken, { dob: dobToIso(b.dob), phn: b.hasCard ? digits(b.cardNumber) : "", email: b.email.trim() });
+      const known = await bimble.checkIdentity(accessToken, { dob: dobIso, phn: b.hasCard ? digits(b.cardNumber) : "", email: b.email.trim() });
       setB((prev) => {
         const keep = (current: string, saved: string) => current.trim() || saved;
-        const sex = sexOptions.find((o) => o.label.toLowerCase() === known.gender.toLowerCase())?.id ?? "";
-        const pharmacy = !prev.pharmacy && known.savedPharmacy;
+        const gender = genderOptions.find((o) => o.value.toLowerCase() === known.gender.toLowerCase() || o.label.toLowerCase() === known.gender.toLowerCase())?.id ?? "";
         return {
           ...prev,
-          firstName: keep(prev.firstName, known.firstName),
-          lastName: keep(prev.lastName, known.lastName),
-          sex: prev.sex || sex,
+          firstName: capitalizeName(keep(prev.firstName, known.firstName)),
+          lastName: capitalizeName(keep(prev.lastName, known.lastName)),
+          gender: prev.gender || gender,
           addressLine: keep(prev.addressLine, known.addressLine),
           unitNumber: keep(prev.unitNumber, known.unitNumber),
           city: keep(prev.city, known.city),
@@ -416,22 +639,12 @@ export function BookingFlow() {
                 emergencyRelation: relationOptions.includes(known.savedEmergencyContact.relation) ? known.savedEmergencyContact.relation : prev.emergencyRelation,
               }
             : {}),
-          ...(pharmacy
-            ? {
-                pharmacy: pharmacy.name,
-                pharmacyAddress: pharmacy.address,
-                pharmacyCity: pharmacy.city,
-                pharmacyPostalCode: pharmacy.postalCode,
-                pharmacyPhone: pharmacy.phone,
-              }
-            : {}),
         };
       });
       setSavedPharmacy(known.savedPharmacy);
       setWelcome(known.existing ? `Welcome back${known.name ? `, ${known.name}` : ""}! We found your record and filled in what we have.` : "");
-      setCheckedIdentity(identityKey());
-      finish(2);
-      setStep(3);
+      setCheckedIdentity(identityFor(accessToken));
+      return true;
     } catch (e) {
       if (e instanceof BimbleError && e.status === 401) {
         // The verification expired: text a new code.
@@ -444,71 +657,144 @@ export function BookingFlow() {
       const key = fieldName === "phn" ? "cardNumber" : fieldName === "emailIfNoPhn" ? "email" : fieldName === "dateOfBirth" ? "dob" : "";
       if (key) setErrors({ [key]: message });
       else setApiError(message);
-      setStep(2);
+      setStep(3);
+      return false;
     }
   };
+  /** Step 3: match the record, save the visit, move on. */
+  const checkIdentity = async (accessToken: string) => {
+    if (!(await matchRecord(accessToken))) return;
+    if (!(await saveVisit(accessToken))) return;
+    finish(3);
+    setStep(4);
+  };
 
-  /** Step 2: verify the phone (once), then have Bimble check who is booking. */
+  /** The verification ran out: say so plainly and text a new code. */
+  const verificationExpired = () => {
+    setToken(null);
+    setOtp(null);
+    setCode("");
+    setApiError("Your verification expired. We’re texting you a new code.");
+    void sendInBackground();
+  };
+
+  /** Find your record: the phone is verified (the code is texted by itself), then Bimble checks who is booking. */
   const identify = async () => {
     setApiError("");
     // Back to look or edit, and nothing here changed: carry on without asking Bimble again.
-    if (verifiedToken() && checkedIdentity === identityKey()) {
-      finish(2);
-      setStep(3);
+    if (verifiedToken() && checkedIdentity === identityFor(verifiedToken())) {
+      finish(3);
+      setStep(4);
       return;
     }
+    const verified = verifiedToken();
+    if (!verified) {
+      // The code is on its way (the line under the phone says so) or already sent: it only needs entering.
+      if (sendingNow.current) return;
+      if (otp && otp.phone === b.cellPhone) return showErrors({ code: "Enter the code we texted you." });
+      return void sendInBackground();
+    }
     setBusy(true);
+    setWaiting("Please wait — finding your record…");
     try {
-      const verified = verifiedToken();
-      if (verified) await checkIdentity(verified);
-      else await sendCode("identity");
+      await checkIdentity(verified);
     } catch (e) {
-      setApiError(errorText(e, "Something went wrong. Please try again or call the clinic."));
+      if (e instanceof BimbleError && e.status === 401) verificationExpired();
+      else setApiError(errorText(e, "Something went wrong. Please try again or call the clinic."));
     } finally {
       setBusy(false);
+      setWaiting("");
     }
   };
+
+  /** Texts the code without a button, as soon as the cell phone is complete. */
+  const sendInBackground = async () => {
+    if (sendingNow.current) return;
+    sendingNow.current = true;
+    setSending(true);
+    setErrors((e) => ({ ...e, cellPhone: "", code: "" }));
+    try {
+      await sendCode();
+    } catch (e) {
+      setErrors((er) => ({ ...er, cellPhone: errorText(e, "We couldn’t text a code to this number. Check it and try again.") }));
+    } finally {
+      sendingNow.current = false;
+      setSending(false);
+    }
+  };
+  useEffect(() => {
+    if (!live || step !== 3 || digits(b.cellPhone).length !== 10 || sending || verifiedToken()) return;
+    if (otp && otp.phone === b.cellPhone) return;
+    // A short pause, so a number still being corrected isn't texted.
+    const t = setTimeout(() => void sendInBackground(), 700);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live, step, b.cellPhone, otp, token]);
 
   // ---- booking ---------------------------------------------------------------------------------
   /** Everything the doctor should see beyond the reason for visit. */
   const visitNotes = () =>
     [
-      b.method !== "in-clinic" ? `Visit by: ${methodLabel(b.method)}` : "",
+      b.reasonOther && b.otherText.trim() ? `In the patient’s words: ${b.otherText.trim()}` : "",
       b.noKnownAllergies && !b.allergies.trim() ? "No known allergies" : "",
       b.notes.trim(),
     ]
       .filter(Boolean)
       .join("\n");
 
-  const book = async (accessToken: string) => {
+  const book = async (accessToken: string, sendVisit: boolean) => {
     const res = await bimble.book(accessToken, {
       phn: b.hasCard ? digits(b.cardNumber) : "",
       email: b.email.trim(),
-      dob: dobToIso(b.dob),
+      dob: dobIso,
       firstName: b.firstName.trim(),
       lastName: b.lastName.trim(),
-      sex: sexOptions.find((o) => o.id === b.sex)?.label ?? b.sex,
-      address: { street: b.addressLine.trim(), unit: b.unitNumber.trim(), city: b.city.trim(), province: b.province, postalCode: b.postalCode.trim().toUpperCase() },
-      reason: b.reasonBimble || b.reason.trim(),
+      gender: genderOptions.find((o) => o.id === b.gender)?.value ?? b.gender,
+      address: {
+        street: b.addressLine.trim(),
+        unit: b.unitNumber.trim(),
+        city: b.city.trim(),
+        province: b.province,
+        postalCode: b.postalCode.trim().toUpperCase(),
+        latitude: b.latitude,
+        longitude: b.longitude,
+      },
+      reason: reasonForBimble(),
       serviceId: b.reasonServiceId,
       allergies: b.allergies,
       notes: visitNotes(),
-      visitType: visitTypeFor(b.method),
-      date: b.date,
-      time: b.slotTime,
-      doctorId: b.slotDoctorId ?? 0,
-      firstAvailable: b.providerId === "any",
+      visit: sendVisit ? visitFor() : undefined,
+      pharmacyChoice: noPharmacy ? "none" : b.pharmacyChoice === "bimble" ? "bimble" : "own",
       pharmacy: { name: b.pharmacy, address: b.pharmacyAddress, city: b.pharmacyCity, postalCode: b.pharmacyPostalCode, phone: b.pharmacyPhone },
-      delivery: b.delivery,
+      delivery: b.pharmacyChoice === "bimble" ? "delivery" : b.delivery,
       pharmacyConsent: b.pharmacyConsent,
       emergencyContact: { name: b.emergencyName, phone: b.emergencyPhone, relation: b.emergencyRelation },
     });
-    setB((prev) => ({ ...prev, provider: res.assigned_doctor_name || prev.provider, cardNumber: "" }));
+    setB((prev) => ({ ...prev, cardNumber: "" }));
     setReference(String(res.appointment_id));
+    setBooked({ token: res.patient_access_token ?? "", appointmentId: res.appointment_id });
     setToken(null);
     setOtp(null);
-    finish(5);
+    finish(7);
     setStep("booked");
+  };
+
+  /**
+   * Book with a verified phone: first make sure Bimble has matched this record and holds this visit
+   * for this verification, then book the time it holds (not sent again, so it isn't re-checked
+   * against the 30-minute lead time). A hold that ran out (10 minutes) is saved again, once.
+   */
+  const bookWith = async (accessToken: string) => {
+    if (checkedIdentity !== identityFor(accessToken) && !(await matchRecord(accessToken))) return;
+    if (savedVisit !== visitKey(accessToken) && !(await saveVisit(accessToken))) return;
+    try {
+      await book(accessToken, false);
+    } catch (e) {
+      const message = e instanceof BimbleError ? e.message : "";
+      if (!(e instanceof BimbleError && e.status === 409 && /hold|no longer active|expired/i.test(message))) throw e;
+      if (!(await saveVisit(accessToken))) return;
+      await book(accessToken, false);
+    }
   };
 
   /** `fromBook`: the booking call failed (the phone was already verified), not sending or checking the code. */
@@ -520,22 +806,33 @@ export function BookingFlow() {
       // The verification expired: the next Book texts a new code.
       setToken(null);
       setApiError("Your verification expired. Press Book again and we’ll text you a new code.");
-      setStep(5);
-    } else if (status === 409) {
-      // Someone else just took that time, or it is too close to another booking of theirs.
+      setStep(7);
+    } else if (status === 409 && /verification code/i.test(message)) {
+      // The code was already used: the next Book texts a new one.
+      setToken(null);
+      setApiError("Please verify your phone again. Press Book and we’ll text you a new code.");
+      setStep(7);
+    } else if (status === 409 && /PHN|health|date of birth|email|record/i.test(message)) {
+      // Bimble uses 409 for identity problems too (a record with this health card or email
+      // exists, or its date of birth differs): that is fixed on "Find your record", not by a new time.
+      setErrors({ [b.hasCard ? "cardNumber" : "email"]: message });
+      setStep(3);
+    } else if (tooCloseOrTaken(status, message)) {
+      // Someone else just took that time, or it is now too close: choose again from fresh times.
       setApiError(message);
-      set({ date: "", time: null, slotTime: "", slotDoctorId: null });
+      rejectCurrentAnyTime();
+      clearTime();
       setSlotsVersion((v) => v + 1);
-      setStep(1);
+      setStep(2);
     } else {
       const fieldName = e instanceof BimbleError ? e.field : "";
       const key = fieldName === "phn" ? "cardNumber" : fieldName === "emailIfNoPhn" ? "email" : fieldName === "dateOfBirth" ? "dob" : "";
       if (key) {
         setErrors({ [key]: message });
-        setStep(2);
+        setStep(3);
       } else {
         setApiError(message);
-        setStep(5);
+        setStep(7);
       }
     }
   };
@@ -547,15 +844,16 @@ export function BookingFlow() {
       await new Promise((r) => setTimeout(r, 700)); // demo: nothing is sent
       setBusy(false);
       setReference("DEMO");
-      finish(5);
+      setBooked({ token: "", appointmentId: null });
+      finish(7);
       setStep("booked");
       return;
     }
     // This phone is already verified: book directly.
     const verified = verifiedToken();
     try {
-      if (verified) await book(verified);
-      else await sendCode("book");
+      if (verified) await bookWith(verified);
+      else await sendCode();
     } catch (e) {
       handleBookingError(e, Boolean(verified));
     } finally {
@@ -572,8 +870,10 @@ export function BookingFlow() {
       setErrors({ code: "Enter the code we texted you." });
       return;
     }
+    const forBooking = step === 7;
     setApiError("");
     setBusy(true);
+    setWaiting(forBooking ? "Please wait — checking your code and booking…" : "Please wait — checking your code and finding your record…");
     try {
       if (!verified) {
         try {
@@ -589,13 +889,20 @@ export function BookingFlow() {
         setOtp(null);
         setCode("");
       }
-      if (verifyFor === "identity") await checkIdentity(verified);
-      else await book(verified);
+      if (!forBooking) {
+        // The phone is confirmed; the record needs the health card (or email) and date of birth too.
+        const missing = validate(3);
+        delete missing.cellPhone;
+        if (Object.keys(missing).length) return showErrors(missing);
+        await checkIdentity(verified);
+      } else await bookWith(verified);
     } catch (e) {
-      if (verifyFor === "identity") setApiError(errorText(e, "Something went wrong. Please try again or call the clinic."));
-      else handleBookingError(e, Boolean(verified));
+      if (forBooking) handleBookingError(e, Boolean(verified));
+      else if (e instanceof BimbleError && e.status === 401) verificationExpired();
+      else setApiError(errorText(e, "Something went wrong. Please try again or call the clinic."));
     } finally {
       setBusy(false);
+      setWaiting("");
     }
   };
 
@@ -603,7 +910,7 @@ export function BookingFlow() {
     setApiError("");
     setBusy(true);
     try {
-      await sendCode(verifyFor);
+      await sendCode();
     } catch (e) {
       setApiError(errorText(e, "Could not send a new code. Please try again."));
     } finally {
@@ -612,55 +919,83 @@ export function BookingFlow() {
   };
 
   // ---- navigation --------------------------------------------------------------------------------
-  const next = () => {
-    const e = validate(step);
+  const showErrors = (e: Errors) => {
     setErrors(e);
-    if (Object.keys(e).length) {
-      // Show the first problem, wherever it is on the page.
-      requestAnimationFrame(() => document.querySelector("main [role=alert]")?.scrollIntoView({ block: "center", behavior: "smooth" }));
-      return;
+    // Show the first problem, wherever it is on the page.
+    requestAnimationFrame(() => document.querySelector("main [role=alert]")?.scrollIntoView({ block: "center", behavior: "smooth" }));
+  };
+  const next = async () => {
+    let current = b;
+    // "Something else" not matched yet (Next pressed straight from the text box): match it first.
+    if (step === 1 && live && b.reasonOther && b.reasonServiceId === null && b.otherText.trim().length >= 8) {
+      const patch = await matchOther();
+      if (patch) current = { ...b, ...patch };
     }
+    const e = validate(step, current);
+    if (Object.keys(e).length) return showErrors(e);
+    setErrors({});
     setApiError("");
-    if (step === 1) {
-      finish(1);
-      setStep(2);
-    } else if (step === 2) {
+    if (step === 2) {
+      // Already verified (back to change the time): save the new choice so Bimble checks it.
+      const verified = verifiedToken();
+      if (verified) {
+        setBusy(true);
+        try {
+          if (!(await saveVisit(verified))) return;
+        } catch {
+          setToken(null);
+        } finally {
+          setBusy(false);
+        }
+      }
+      finish(2);
+      setStep(3);
+    } else if (step === 3) {
       if (live) void identify();
       else {
-        finish(2);
-        setStep(3);
+        finish(3);
+        setStep(4);
       }
-    } else if (step === 3) {
-      finish(3);
-      setStep(4);
-    } else if (step === 4) {
-      finish(4);
-      setStep(5);
-    } else if (step === 5) void confirmBook();
+    } else if (step === 7) {
+      // A change made from Review (e.g. another visit type clears the time) must be finished first.
+      // A reason changed from a note or form to something that needs a pharmacy brings Pharmacy back too.
+      // Steps reached from the side panel may have been skipped: every step is checked before booking.
+      const unfinished = ([1, 2, 3, 4, 5, 6] as const).find((n) => Object.keys(validate(n)).length);
+      if (unfinished) {
+        setStep(unfinished);
+        showErrors(validate(unfinished));
+      } else void confirmBook();
+    } else if (step === 4 && noPharmacy) {
+      // A doctor's note or form: no prescription, so Pharmacy is skipped.
+      finish(5);
+      setStep(6);
+    } else {
+      finish(step as number);
+      setStep(((step as number) + 1) as Step);
+    }
   };
   const back = () => {
     setErrors({});
     setApiError("");
-    if (typeof step === "number" && step > 1) setStep((step - 1) as Step);
+    if (step === 6 && noPharmacy) setStep(4);
+    else if (typeof step === "number" && step > 1) setStep((step - 1) as Step);
   };
-  /** Go to a finished step (or the next one) from the side panel or the summary pill. */
+  /** Go to a finished step (or the next one) from the side panel, the summary pill or Review. */
   const goTo = (n: number) => {
+    // Not while a check or booking is running: its result would pull the patient back.
+    if (busy) return;
     if (n <= done + 1) {
       setErrors({});
       setApiError("");
       setStep(n as Step);
     }
   };
-  const skipPharmacy = () => {
-    set({ pharmacy: "", pharmacyAddress: "", pharmacyCity: "", pharmacyPostalCode: "", pharmacyPhone: "", pharmacyConsent: false });
-    finish(4);
-    setStep(5);
-  };
   const choosePharmacy = (p: BimblePharmacy) => {
     set({ pharmacy: p.name, pharmacyAddress: p.address, pharmacyCity: p.city, pharmacyPostalCode: p.postalCode, pharmacyPhone: p.phone });
     // The search did its job: show just the chosen pharmacy. Typing again brings results back.
     setPharmacyQuery("");
   };
+  const clearPharmacy = { pharmacy: "", pharmacyAddress: "", pharmacyCity: "", pharmacyPostalCode: "", pharmacyPhone: "" };
 
   const downloadCalendar = () => {
     const url = URL.createObjectURL(new Blob([calendarFile(b)], { type: "text/calendar" }));
@@ -668,38 +1003,39 @@ export function BookingFlow() {
     a.href = url;
     a.download = `123-walk-in-appointment-${b.date}.ics`;
     a.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
   };
 
   // ---- summaries -----------------------------------------------------------------------------------
-  const when = b.date && b.slotTime ? `${dayLabel(b.date)} ${b.slotTime}` : "";
-  const visitSummary = [methodShort(b.method), when, b.reason.trim()].filter(Boolean).join(" · ");
-  /** "See you today at 4:00 PM" / "See you on Wed 30 at 4:00 PM". */
-  const seeYou = (() => {
-    if (!b.date || !b.slotTime) return "See you soon";
-    const day = dayLabel(b.date);
-    return `See you ${day === "Today" || day === "Tomorrow" ? day.toLowerCase() : `on ${day}`} at ${b.slotTime}`;
-  })();
-  const deliveryLabel = b.delivery === "delivery" ? "Home delivery" : b.delivery === "pickup" ? "Pick up" : "";
+  const reasonShown = b.reasonOther ? b.reasonBimble || b.otherText.trim() : b.reason.trim();
+  const when = b.date && b.slotTime ? `${shortDate(b.date)} · ${b.slotTime}` : "";
+  const visitSummary = [methodLabel(b.method), when, reasonShown].filter(Boolean).join(" · ");
+  /** Side panel: what was chosen on Your visit, and on Doctor & time. */
+  const visitOnly = [methodLabel(b.method), reasonShown].filter(Boolean).join(" · ");
+  const pharmacyLabel = noPharmacy
+    ? "Not needed for a note or form"
+    : b.pharmacyChoice === "bimble"
+      ? "Bimble Pharmacy · delivery"
+      : b.pharmacyChoice === "own" && b.pharmacy
+        ? `${b.pharmacy} · ${b.delivery === "delivery" ? "delivery" : "pick up"}`
+        : "";
+  const genderLabel = genderOptions.find((o) => o.id === b.gender)?.label ?? "";
+  const dobShown = dobLabel(b.dobMonth, b.dobDay, b.dobYear);
   const stepSummary = [
-    visitSummary,
-    live && verifiedToken() ? "Verified by text" : b.hasCard ? `Health card ••••${digits(b.cardNumber).slice(-4)}` : b.email,
-    [b.firstName, b.lastName].filter(Boolean).join(" "),
-    b.pharmacy ? [b.pharmacy, deliveryLabel].filter(Boolean).join(" · ") : "No pharmacy",
+    visitOnly,
+    [b.doctorMode === "any" ? "Soonest" : "", b.doctorName, when].filter(Boolean).join(" · "),
+    [live && verifiedToken() ? "Verified by text" : b.hasCard ? `Health card ••••${digits(b.cardNumber).slice(-4)}` : b.email, dobShown].filter(Boolean).join(" · "),
+    [[b.firstName, b.lastName].filter(Boolean).join(" "), b.city].filter(Boolean).join(" · "),
+    pharmacyLabel,
+    b.allergies.trim() || (b.noKnownAllergies ? "No known allergies" : ""),
     "",
   ];
-  const current = step === "booked" ? 6 : step;
+  const current = step === "booked" ? 8 : step;
   const clinicPhone = site.phone.replace(/^\+1\s*/, "");
   /** After booking: what the patient can expect, in order. */
   const nextSteps: ReactNode[] = [
     <>We’ve texted your confirmation to <b>{b.cellPhone}</b>.</>,
-    b.method === "video" ? (
-      <>We’ll text you the video link before your appointment.</>
-    ) : b.method === "phone" ? (
-      <>The doctor will call you at <b>{b.cellPhone}</b> at your appointment time.</>
-    ) : (
-      <>Come to {clinicLocation.address} a few minutes early.</>
-    ),
+    <>{b.doctorName || "Your doctor"} will contact you at your appointment time for your virtual visit.</>,
     <>
       Need to change or cancel? Call{" "}
       <a href={site.phoneHref} className={cn("font-bold underline", ring)}>
@@ -708,14 +1044,22 @@ export function BookingFlow() {
       .
     </>,
   ];
+  const bookedTitle = "You’re booked";
+  const bookedLine = b.date ? `See you ${longDate(b.date)} at ${b.slotTime}${b.doctorName ? ` with ${b.doctorName}` : ""}.` : "See you soon.";
   const copy = step === "booked" ? null : COPY[step];
 
   /** Enter the texted code right where the phone number is (no separate screen). */
+  const waitBox = waiting && (
+    <div role="status" className="flex items-center gap-3 rounded-2xl bg-[#fff7e3] px-4 py-3.5 text-[15px] font-semibold text-[#5c4400]">
+      <span className="size-5 shrink-0 animate-spin rounded-full border-[2.5px] border-[#e8c46a] border-t-[#14243a]" aria-hidden="true" />
+      {waiting}
+    </div>
+  );
   const codePanel = otp && (
     <div>
       <span className="mb-2 block text-xs font-bold text-[#4a5a6e] lg:text-[13px]">
         Code texted to {otp.maskedPhone}
-        {verifyFor === "book" ? " — enter it to book" : ""}
+        {step === 7 ? " — enter it to book" : ""}
       </span>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <CodeInput value={code} onChange={(v) => { setCode(v); setErrors((e) => ({ ...e, code: "" })); }} onComplete={(full) => !busy && void verifyCode(full)} invalid={!!errors.code} />
@@ -728,7 +1072,8 @@ export function BookingFlow() {
     </div>
   );
   /** A texted code is waiting to be entered on this screen. */
-  const awaitingCode = Boolean(otp) && ((step === 2 && verifyFor === "identity") || (step === 5 && verifyFor === "book"));
+  const awaitingCode = Boolean(otp) && (step === 3 || step === 7);
+
 
   // ---- render --------------------------------------------------------------------------------------
   return (
@@ -739,8 +1084,8 @@ export function BookingFlow() {
           <Logo onDark size="sm" />
         </div>
         <div className="flex flex-col gap-3">
-          <h1 className="text-[40px] leading-[1.08] font-extrabold tracking-[-0.03em] xl:text-[48px] 2xl:text-[56px]">{copy ? copy.headline : "You’re booked."}</h1>
-          <p className="text-base leading-normal text-[#c8d3de]">{copy ? copy.line : `${seeYou}.`}</p>
+          <h1 className="text-[40px] leading-[1.08] font-extrabold tracking-[-0.03em] xl:text-[48px] 2xl:text-[56px]">{copy ? copy.headline : `${bookedTitle}.`}</h1>
+          <p className="text-base leading-normal text-[#c8d3de]">{copy ? copy.line : bookedLine}</p>
         </div>
         {step === "booked" ? (
           <div className="flex flex-col gap-4">
@@ -755,40 +1100,41 @@ export function BookingFlow() {
             </ol>
           </div>
         ) : (
-        <ol className="flex flex-col gap-4">
-          {STEPS.map((name, i) => {
-            const n = i + 1;
-            // A finished step stays ticked (and editable) even after going back to an earlier one.
-            const isDone = n !== current && (n < current || n <= done);
-            const isCurrent = n === current;
-            return (
-              <li key={name} className={cn("flex items-start gap-3.5 text-base font-bold", !isDone && !isCurrent && "text-[#8fa1b5]")}>
-                <span
-                  className={cn(
-                    "grid size-[34px] shrink-0 place-items-center rounded-full text-sm font-extrabold",
-                    isDone ? "bg-[#1f7a4a] text-white" : isCurrent ? "bg-[#c18700] text-[#14243a]" : "border-2 border-[#34496a]",
-                  )}
-                >
-                  {isDone ? <CheckIcon className="size-4" strokeWidth={3} /> : n}
-                </span>
-                <span className="flex min-w-0 flex-col gap-0.5">
-                  {name}
-                  {isDone && stepSummary[i] && <span className="text-[13px] leading-snug font-medium break-words text-[#c8d3de]">{stepSummary[i]}</span>}
-                </span>
-                {isDone && (
-                  <button
-                    type="button"
-                    onClick={() => goTo(n)}
-                    aria-label={`Edit ${name.toLowerCase()}`}
-                    className={cn("ml-auto grid size-9 shrink-0 place-items-center rounded-full bg-white/10 text-[#fbd97a] hover:text-white", ring)}
+          <ol className="flex flex-col gap-4">
+            {STEPS.map((name, i) => {
+              const n = i + 1;
+              // A finished step stays ticked (and editable) even after going back to an earlier one.
+              const isDone = n !== current && (n < current || n <= done);
+              const isCurrent = n === current;
+              return (
+                <li key={name} className={cn("flex items-start gap-3.5 text-base font-bold", !isDone && !isCurrent && "text-[#8fa1b5]")}>
+                  <span
+                    className={cn(
+                      "grid size-[34px] shrink-0 place-items-center rounded-full text-sm font-extrabold",
+                      isDone ? "bg-[#1f7a4a] text-white" : isCurrent ? "bg-[#c18700] text-[#14243a]" : "border-2 border-[#34496a]",
+                    )}
                   >
-                    <PencilIcon />
-                  </button>
-                )}
-              </li>
-            );
-          })}
-        </ol>
+                    {isDone ? <CheckIcon className="size-4" strokeWidth={3} /> : n}
+                  </span>
+                  <span className="flex min-w-0 flex-col gap-0.5">
+                    {name}
+                    {isDone && stepSummary[i] && <span className="text-[13px] leading-snug font-medium break-words text-[#c8d3de]">{stepSummary[i]}</span>}
+                  </span>
+                  {isDone && !(noPharmacy && n === 5) && (
+                    <button
+                      type="button"
+                      onClick={() => goTo(n)}
+                      disabled={busy}
+                      aria-label={`Edit ${name.toLowerCase()}`}
+                      className={cn("ml-auto grid size-9 shrink-0 place-items-center rounded-full bg-white/10 text-[#fbd97a] hover:text-white", ring)}
+                    >
+                      <PencilIcon />
+                    </button>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
         )}
         <p className="mt-auto text-[15px] leading-relaxed text-[#ffd6d6] 2xl:text-base">
           If you are experiencing a medical emergency, please do not book using this site and call 9-1-1 instead.{" "}
@@ -831,16 +1177,17 @@ export function BookingFlow() {
               <CheckIcon className="size-9" strokeWidth={2.8} />
             </span>
           )}
-          <h1 className="text-[28px] leading-[1.15] font-extrabold tracking-[-0.025em] sm:text-[30px]">{copy ? copy.title : "You’re booked!"}</h1>
+          <h1 className="text-[28px] leading-[1.15] font-extrabold tracking-[-0.025em] sm:text-[30px]">{copy ? copy.title : `${bookedTitle}!`}</h1>
           {step === "booked" ? (
-            <span className="text-[15px] text-[#c8d3de]">{seeYou}</span>
+            <span className="text-[15px] text-[#c8d3de]">{bookedLine}</span>
           ) : (
-            copy?.sub && step !== 2 && <span className="text-sm text-[#c8d3de]">{copy.sub}</span>
+            copy?.sub && step !== 3 && <span className="text-sm text-[#c8d3de]">{copy.sub}</span>
           )}
           {typeof step === "number" && step > 1 && visitSummary && (
             <button
               type="button"
               onClick={() => goTo(1)}
+              disabled={busy}
               aria-label="Edit your visit"
               className={cn("flex min-h-[34px] max-w-full items-center gap-2 self-start rounded-[17px] bg-white/12 py-1.5 pr-3 pl-3.5 text-left text-[13px] leading-snug font-semibold", ring)}
             >
@@ -857,7 +1204,7 @@ export function BookingFlow() {
           id="main"
           className={cn(
             "-mt-6 flex min-w-0 flex-1 flex-col rounded-t-[28px] bg-white px-5 pt-6 lg:mx-auto lg:mt-0 lg:w-full lg:max-w-[820px] lg:rounded-none lg:px-16 lg:pt-10 lg:pb-8",
-            // Booked: the card starts level with the side panel's "You're booked." headline.
+            // Booked: the card starts level with the side panel's headline.
             step === "booked" && "lg:pt-[108px]",
           )}
         >
@@ -872,7 +1219,25 @@ export function BookingFlow() {
           )}
           {apiError && (
             <div ref={apiErrorRef} role="alert" className="mb-5 flex items-start justify-between gap-3 rounded-2xl bg-[#fdecec] px-4 py-3 text-[15px] text-[#9b1c1c]">
-              <p>{apiError}</p>
+              <p>
+                {apiError}
+                {loadFailed && (
+                  <>
+                    {" "}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLoadFailed(false);
+                        setApiError("");
+                        setLoadTry((n) => n + 1);
+                      }}
+                      className={cn("font-bold underline", ring)}
+                    >
+                      Try again
+                    </button>
+                  </>
+                )}
+              </p>
               <button type="button" aria-label="Dismiss" onClick={() => setApiError("")} className={cn("grid size-6 shrink-0 place-items-center rounded-full hover:bg-black/5", ring)}>
                 <XIcon className="size-4" />
               </button>
@@ -883,10 +1248,75 @@ export function BookingFlow() {
           {step === 1 && (
             <div className="flex flex-col gap-6 lg:gap-8">
               <div>
-                <label htmlFor="reason" className={qText}>
+                <label htmlFor={b.reasonOther ? "otherText" : "reason"} className={qText}>
                   What’s it for?
                 </label>
-                {live ? (
+                {b.reasonOther ? (
+                  <>
+                    <textarea
+                      id="otherText"
+                      maxLength={300}
+                      placeholder="Tell us what you need help with, e.g. follow-up on blood test results"
+                      value={b.otherText}
+                      onChange={(e) => {
+                        set({ otherText: e.target.value, reasonServiceId: null, reasonBimble: "" });
+                        setMatchOptions([]);
+                      }}
+                      onBlur={() => void matchOther()}
+                      aria-invalid={!!errors.reason}
+                      className={cn(
+                        "h-24 w-full resize-none rounded-[14px] border-0 bg-[#f0f4f7] px-4 py-3 text-base text-[#14243a] outline-none placeholder:text-[#6b7a8c] focus:shadow-[inset_0_0_0_2px_#14243a]",
+                        errors.reason && invalidRing,
+                      )}
+                    />
+                    <p className="mx-1 mt-1.5 text-xs text-[#4a5a6e] lg:text-[13px]">
+                      {matching ? (
+                        "Matching your reason…"
+                      ) : live && b.reasonServiceId !== null && b.reasonBimble ? (
+                        <>
+                          We’ll book it as <b className="text-[#14243a]">{b.reasonBimble}</b>.
+                        </>
+                      ) : (
+                        "We’ll match it to the right service. "
+                      )}{" "}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          set({ reasonOther: false, otherText: "", reasonServiceId: null, reasonBimble: "" });
+                          setMatchOptions([]);
+                        }}
+                        className={cn("font-bold text-[#14243a] underline", ring)}
+                      >
+                        Pick from the list instead
+                      </button>
+                    </p>
+                    {matchOptions.length > 1 && (
+                      <div className="mt-3">
+                        <span className="mb-1.5 block text-[13px] font-bold">Which fits best?</span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {matchOptions.map((o) => {
+                            const on = b.reasonServiceId === o.serviceId && b.reasonBimble === o.reason;
+                            return (
+                              <button
+                                key={`${o.serviceId}-${o.reason}`}
+                                type="button"
+                                aria-pressed={on}
+                                onClick={() => set({ reasonServiceId: o.serviceId, reasonBimble: o.reason })}
+                                className={cn(
+                                  "h-9 rounded-full border px-3.5 text-[13px] font-semibold",
+                                  on ? "border-[#14243a] bg-[#14243a] text-white" : "border-[#d5dee6] bg-white text-[#3d4d61] hover:border-[#14243a]",
+                                  ring,
+                                )}
+                              >
+                                {o.reason}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                ) : live ? (
                   <Combobox
                     id="reason"
                     value={b.reason}
@@ -895,7 +1325,7 @@ export function BookingFlow() {
                     loading={!reasons.length}
                     emptyText="No matching reason. Try another word."
                     invalid={!!errors.reason}
-                    className={cn(field, errors.reason && "shadow-[inset_0_0_0_2px_#c92a2a]")}
+                    className={cn(field, errors.reason && invalidRing)}
                     onChange={(text) => {
                       // Typing keeps the reason only while it still matches a listed one (or a quick button) exactly.
                       const typed = text.trim().toLowerCase();
@@ -904,6 +1334,12 @@ export function BookingFlow() {
                       set({ reason: text, reasonServiceId: exact?.serviceId ?? null, reasonBimble: exact?.label ?? "" });
                     }}
                     onPick={(o) => {
+                      if (o.key === OTHER_KEY) {
+                        const typed = b.reason.trim();
+                        startOther();
+                        set({ reasonOther: true, reason: "", otherText: typed, reasonServiceId: null, reasonBimble: "" });
+                        return;
+                      }
                       const r = reasons.find((x) => `${x.serviceId}:${x.label}` === o.key);
                       if (r) chooseReason(r);
                     }}
@@ -915,193 +1351,253 @@ export function BookingFlow() {
                     value={b.reason}
                     onChange={(e) => set({ reason: e.target.value })}
                     aria-invalid={!!errors.reason}
-                    className={cn(field, errors.reason && "shadow-[inset_0_0_0_2px_#c92a2a]")}
+                    className={cn(field, errors.reason && invalidRing)}
                   />
                 )}
-                {quickReasons.length > 0 && (
-                  <div className="mt-2.5 flex flex-wrap gap-1.5 lg:mt-3 lg:gap-2">
-                    {quickReasons.map(({ label, reason }, i) => {
-                      const on = b.reason === label && (!reason || b.reasonServiceId === reason.serviceId);
-                      return (
-                        <button
-                          key={label}
-                          type="button"
-                          aria-pressed={on}
-                          onClick={() => (reason ? chooseReason(reason, label) : set({ reason: label }))}
-                          className={cn(
-                            "h-[34px] rounded-full border px-3 text-[13px] font-semibold lg:h-9 lg:px-3.5",
-                            on ? "border-[#14243a] bg-[#14243a] text-white" : "border-[#d5dee6] bg-white text-[#3d4d61] hover:border-[#14243a]",
-                            // Phones show four, so the row stays short.
-                            i === 2 && "max-lg:hidden",
-                            ring,
-                          )}
-                        >
-                          {label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-                {errors.reason && <Err>{errors.reason}</Err>}
-              </div>
-
-              <fieldset className="min-w-0">
-                <legend className={qText}>How would you like to meet?</legend>
-                <div className="grid grid-cols-3 gap-2 lg:gap-3">
-                  {offeredMethods.map((m) => {
-                    const on = b.method === m.id;
+                <div className="mt-2.5 flex flex-wrap gap-1.5 lg:mt-3 lg:gap-2">
+                  {quickReasons.map(({ label, reason }, i) => {
+                    const on = !b.reasonOther && b.reason === label && (!reason || b.reasonServiceId === reason.serviceId);
                     return (
                       <button
-                        key={m.id}
+                        key={label}
                         type="button"
                         aria-pressed={on}
-                        onClick={() => set({ method: m.id })}
+                        onClick={() => (reason ? chooseReason(reason, label) : set({ reason: label, reasonOther: false }))}
                         className={cn(
-                          "flex h-[68px] w-full flex-col items-center justify-center gap-1 rounded-[18px] px-2 text-sm font-bold transition-colors lg:h-14 lg:flex-row lg:gap-2.5 lg:text-[15px]",
-                          on ? "border-2 border-[#14243a] bg-[#fbecc4]" : "border-[1.5px] border-[#e1e8ee] bg-white hover:border-[#9fb0c2]",
+                          "h-[34px] rounded-full border px-3 text-[13px] font-semibold lg:h-9 lg:px-3.5",
+                          on ? "border-[#14243a] bg-[#14243a] text-white" : "border-[#d5dee6] bg-white text-[#3d4d61] hover:border-[#14243a]",
+                          // Phones show four, so the row stays short.
+                          i === 2 && "max-lg:hidden",
                           ring,
                         )}
                       >
-                        <MethodIcon id={m.id} />
-                        <span className="lg:hidden">{m.short}</span>
-                        <span className="hidden lg:inline">{m.label}</span>
+                        {label}
+                      </button>
+                    );
+                  })}
+                  <button
+                    type="button"
+                    aria-pressed={b.reasonOther}
+                    onClick={() => (b.reasonOther ? undefined : startOther())}
+                    className={cn(
+                      "h-[34px] rounded-full border px-3 text-[13px] font-semibold lg:h-9 lg:px-3.5",
+                      b.reasonOther ? "border-[#14243a] bg-[#14243a] text-white" : "border-[#d5dee6] bg-white text-[#3d4d61] hover:border-[#14243a]",
+                      ring,
+                    )}
+                  >
+                    Something else
+                  </button>
+                </div>
+                {errors.reason && <Err>{errors.reason}</Err>}
+              </div>
+
+              {/* Every visit is virtual: shown for information, nothing to choose. */}
+              <div>
+                <span className="mx-1 mb-1.5 block text-xs font-bold text-[#4a5a6e] lg:text-[13px]">Your visit</span>
+                {/* Looks chosen, like a selected tile: it is the only kind of visit. */}
+                <div className="flex items-center gap-3 rounded-[18px] border-2 border-[#c18700] bg-[#fbecc4] px-4 py-3.5 lg:px-5">
+                  <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-white text-[#14243a]">
+                    <TileIcon />
+                  </span>
+                  <span className="min-w-0 flex-1 text-[15px] lg:text-base">
+                    <b>{methodLabel(b.method || "virtual")}</b>
+                    <span className="text-[#6b4a00]"> · {methods[0].sub}</span>
+                  </span>
+                  <span className="grid size-6 shrink-0 place-items-center rounded-full bg-[#14243a] text-white" aria-label="Selected">
+                    <CheckIcon className="size-3.5" strokeWidth={3} />
+                  </span>
+                </div>
+                {errors.method && <Err>{errors.method}</Err>}
+              </div>
+            </div>
+          )}
+
+          {/* 2 · Doctor & time */}
+          {step === 2 && (
+            <div className="flex flex-col gap-6 lg:gap-8">
+              <fieldset className="min-w-0">
+                <legend className={qText}>Who would you like to see?</legend>
+                <div className="grid gap-2.5 sm:grid-cols-2 lg:gap-3">
+                  {(
+                    [
+                      [
+                        "any",
+                        "Any doctor · soonest first",
+                        soonest === undefined
+                          ? "Finding the next available time…"
+                          : soonest === null
+                            ? "No open times this week"
+                            : `Next available: ${longDate(soonest.date)} · ${soonest.time}`,
+                      ],
+                      ["choose", "Choose a doctor", "Pick your doctor, then a date and time"],
+                    ] as const
+                  ).map(([v, title, sub]) => {
+                    const on = b.doctorMode === v;
+                    return (
+                      <button
+                        key={v}
+                        type="button"
+                        aria-pressed={on}
+                        onClick={() => {
+                          if (on) return;
+                          set({ doctorMode: v, doctorId: null, doctorName: "", date: "", time: null, slotTime: "", slotDoctorId: null });
+                          setViewDate("");
+                          setViewPeriod("");
+                        }}
+                        className={tile(on)}
+                      >
+                        <b className="text-[15px] lg:text-base">{title}</b>
+                        <span className={cn("text-xs lg:text-[13px]", on ? "text-[#6b4a00]" : "text-[#4a5a6e]")}>{sub}</span>
                       </button>
                     );
                   })}
                 </div>
-                {errors.method && <Err>{errors.method}</Err>}
+                {errors.doctorMode && <Err>{errors.doctorMode}</Err>}
               </fieldset>
 
-              <div>
-                <label htmlFor="doctor" className={qText}>
-                  Who would you like to see?
-                </label>
-                <Dropdown
-                  id="doctor"
-                  value={b.providerId}
-                  disabled={noDoctors || !reasonChosen || !doctorsReady}
-                  options={[
-                    {
-                      value: "any",
-                      label: !reasonChosen ? "Choose what it’s for first" : !doctorsReady ? "Finding doctors…" : noDoctors ? "No doctor for this reason" : "First available doctor",
-                    },
-                    ...(reasonChosen && doctorsReady ? doctors.map((d) => ({ value: String(d.id), label: d.name })) : []),
-                  ]}
-                  onChange={(v) => set({ providerId: v, provider: v === "any" ? "First available" : doctorName(Number(v)) })}
-                  className={cn(field, "font-semibold disabled:text-[#6b7a8c]", ring)}
-                />
-              </div>
+              {b.doctorMode === "any" && b.slotTime && b.date && (
+                <div className="rounded-2xl bg-[#f0f4f7] px-4 py-3.5 lg:px-5">
+                  <span className="block text-xs font-bold text-[#4a5a6e] lg:text-[13px]">Your appointment</span>
+                  <b className="mt-0.5 block text-[15px] lg:text-base">
+                    {longDate(b.date)} · {b.slotTime}
+                    {b.doctorName ? ` with ${b.doctorName}` : ""}
+                  </b>
+                  <span className="mt-0.5 block text-[13px] text-[#4a5a6e]">The soonest open time with any of our doctors.</span>
+                </div>
+              )}
 
-              <fieldset className="min-w-0">
-                <legend className={qText}>When?</legend>
-                {!readyForTimes ? (
-                  <p className="rounded-2xl bg-[#f0f4f7] px-4 py-3 text-sm text-[#3d4d61]">
-                    {!reasonChosen && !b.method
-                      ? "Choose what it’s for and how you’d like to meet to see open times."
-                      : !reasonChosen
-                        ? "Choose what it’s for to see open times."
-                        : "Choose how you’d like to meet to see open times."}
-                  </p>
-                ) : slots === null ? (
-                  <p className="text-sm text-[#4a5a6e]">Finding open times…</p>
-                ) : !dates.length ? (
-                  <p className="rounded-2xl bg-[#f0f4f7] px-4 py-3 text-sm text-[#3d4d61]">
-                    {noDoctors
-                      ? "No doctor here sees this reason online. Choose another reason, or call the clinic."
-                      : `No open times${b.providerId !== "any" ? " with this doctor" : ""}. Try another ${b.providerId !== "any" ? "doctor or " : ""}way to meet, or call the clinic.`}
-                  </p>
-                ) : (
-                  <>
-                    <div className="-mx-5 mb-2.5 flex gap-2 overflow-x-auto px-5 pb-1 [scrollbar-width:none] lg:mx-0 lg:mb-3 lg:flex-wrap lg:overflow-visible lg:px-0 lg:pb-0">
-                      {dates.map((d) => (
-                        <button
-                          key={d}
-                          type="button"
-                          aria-pressed={shownDate === d}
-                          onClick={(e) => {
-                            // Phones scroll the row of days: slide the chosen day to the middle.
-                            const chipEl = e.currentTarget;
-                            const row = chipEl.parentElement;
-                            setTimeout(() => {
-                              if (!row || row.scrollWidth <= row.clientWidth) return;
-                              const c = chipEl.getBoundingClientRect();
-                              const r = row.getBoundingClientRect();
-                              row.scrollTo({ left: row.scrollLeft + c.left - r.left - (r.width - c.width) / 2, behavior: "smooth" });
-                            }, 0);
-                            setMoreTimes(false);
-                            setViewDate(d);
-                          }}
-                          className={chip(shownDate === d)}
-                        >
-                          {dayLabel(d)}
-                        </button>
-                      ))}
-                    </div>
-                    {(() => {
-                      const isOn = (s: BimbleSlot) => s.date === b.date && s.time === b.slotTime && s.doctorId === b.slotDoctorId;
-                      const timeButton = (s: BimbleSlot, extra?: string | false) => {
-                        const isSoonest = soonest && s.date === soonest.date && s.time === soonest.time;
-                        return (
-                          <button key={`${s.time}-${s.doctorId}`} type="button" aria-pressed={isOn(s)} onClick={() => pickSlot(s)} className={cn(timeChip(isOn(s)), extra)}>
-                            {s.time}
-                            {isSoonest && <span className="hidden lg:inline"> · soonest</span>}
-                          </button>
-                        );
-                      };
-                      const moreButton = dayTimes.length > 3 && (
-                        <button
-                          type="button"
-                          aria-expanded={moreTimes}
-                          onClick={() => setMoreTimes((v) => !v)}
-                          className={cn("h-[42px] shrink-0 rounded-full px-1.5 text-sm font-bold underline hover:bg-[#f0f4f7] sm:px-2 lg:h-[46px] lg:px-3 lg:text-[15px]", ring)}
-                        >
-                          {moreTimes ? (
-                            "Fewer times"
-                          ) : (
-                            <>
-                              More<span className="max-sm:hidden"> times</span>
-                            </>
+              {b.doctorMode === "choose" && (
+                <>
+                <div>
+                  <label htmlFor="doctor" className={qText}>
+                    Which doctor would you like to see?
+                  </label>
+                  {noDoctors ? (
+                    <p className="rounded-2xl bg-[#f0f4f7] px-4 py-3 text-sm text-[#3d4d61]">No doctor is taking online bookings right now. Please call the clinic.</p>
+                  ) : (
+                    <Dropdown
+                      id="doctor"
+                      placeholder={doctorsReady ? "Choose a doctor" : "Finding doctors…"}
+                      disabled={!doctorsReady}
+                      value={b.doctorId === null ? "" : String(b.doctorId)}
+                      options={doctorChoices.map((d) => ({ value: String(d.id), label: d.name }))}
+                      onChange={(v) => {
+                        const d = doctorChoices.find((x) => String(x.id) === v);
+                        if (!d || d.id === b.doctorId) return;
+                        set({ doctorId: d.id, doctorName: d.name, date: "", time: null, slotTime: "", slotDoctorId: null });
+                        setViewDate("");
+                        setViewPeriod("");
+                      }}
+                      invalid={!!errors.doctorId}
+                      className={cn(field, "font-semibold", errors.doctorId && invalidRing, ring)}
+                    />
+                  )}
+                  {errors.doctorId && <Err>{errors.doctorId}</Err>}
+                </div>
+
+                <fieldset className="min-w-0">
+                  <legend className={qText}>When would you like to be seen?</legend>
+                  {(
+                    <div>
+                      {!readyForTimes ? (
+                        <p className="rounded-2xl bg-[#f0f4f7] px-4 py-3 text-sm text-[#3d4d61]">
+                          {!reasonChosen ? "Choose what it’s for first, on Your visit." : "Choose a doctor to see their open times."}
+                        </p>
+                      ) : slots === null ? (
+                        <p className="text-sm text-[#4a5a6e]">Finding open times…</p>
+                      ) : !dates.length ? (
+                        <p className="rounded-2xl bg-[#f0f4f7] px-4 py-3 text-sm text-[#3d4d61]">
+                          No open times with {b.doctorName || "this doctor"} this week. Choose another doctor, or call the clinic.
+                        </p>
+                      ) : (
+                        <div className="flex flex-col gap-3 lg:gap-4">
+                          <div className="grid grid-cols-7 gap-1 sm:gap-1.5 lg:gap-2" role="group" aria-label="Date">
+                            {dates.map((d) => {
+                              const p = dateParts(d);
+                              const on = shownDate === d;
+                              return (
+                                <button
+                                  key={d}
+                                  type="button"
+                                  aria-pressed={on}
+                                  aria-label={longDate(d)}
+                                  onClick={() => {
+                                    setViewDate(d);
+                                    setViewPeriod("");
+                                  }}
+                                  className={cn(
+                                    "flex h-[72px] min-w-0 flex-col items-center justify-center gap-0.5 rounded-xl border-[1.5px] lg:h-20",
+                                    on ? "border-[#14243a] bg-[#14243a] text-white" : "border-[#e1e8ee] bg-white hover:border-[#9fb0c2]",
+                                    ring,
+                                  )}
+                                >
+                                  <span className={cn("text-[10px] font-bold tracking-wide uppercase", on ? "text-white/80" : "text-[#6b7a8c]")}>{p.weekday}</span>
+                                  <span className="text-lg leading-none font-extrabold lg:text-xl">{p.day}</span>
+                                  <span className={cn("text-[10px] font-bold tracking-wide uppercase", on ? "text-white/80" : "text-[#6b7a8c]")}>{p.month}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                          {!shownDate && <p className="text-sm text-[#4a5a6e]">Choose a date to see open times.</p>}
+                          {shownDate && (
+                            <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${periodGroups.length}, minmax(0, 1fr))` }}>
+                              {periodGroups.map((g) => {
+                                const on = shownPeriod?.name === g.name;
+                                return (
+                                  <button
+                                    key={g.name}
+                                    type="button"
+                                    aria-pressed={on}
+                                    onClick={() => setViewPeriod(g.name)}
+                                    style={on ? { backgroundColor: g.color, borderColor: g.color } : { borderColor: `${g.color}55` }}
+                                    className={cn("flex h-[84px] min-w-0 flex-col items-center justify-center gap-1 rounded-xl border-[1.5px] lg:h-[92px]", on ? "text-white" : "bg-white", ring)}
+                                  >
+                                    <PeriodIcon name={g.name} color={on ? undefined : g.color} />
+                                    <span className="text-sm font-bold lg:text-[15px]">{g.name}</span>
+                                    <span className={cn("text-xs font-medium", on ? "text-white/85" : "text-[#4a5a6e]")}>
+                                      {g.items.length} {g.items.length === 1 ? "slot" : "slots"}
+                                    </span>
+                                  </button>
+                                );
+                              })}
+                            </div>
                           )}
-                        </button>
-                      );
-                      if (!moreTimes)
-                        return (
-                          <div className="flex flex-wrap gap-1.5 sm:gap-2">
-                            {dayTimes.slice(0, 4).map((s, i) => timeButton(s, i === 3 && "max-sm:hidden"))}
-                            {moreButton}
-                          </div>
-                        );
-                      // Every time that day, by part of day, in a box that scrolls when the day is long.
-                      let from = 0;
-                      const groups = PERIODS.map((p) => {
-                        const items = dayTimes.filter((s) => slotMinutes(s.time) >= from && slotMinutes(s.time) < p.until);
-                        from = p.until;
-                        return { name: p.name, items };
-                      }).filter((g) => g.items.length);
-                      return (
-                        <>
-                          <div className="flex max-h-[300px] flex-col gap-3 overflow-y-auto rounded-2xl border-[1.5px] border-[#e1e8ee] p-3">
-                            {groups.map((g) => (
-                              <div key={g.name}>
-                                <span className="mb-1.5 block text-xs font-bold tracking-wide text-[#4a5a6e] uppercase">{g.name}</span>
-                                <div className="flex flex-wrap gap-1.5 sm:gap-2">{g.items.map((s) => timeButton(s))}</div>
-                              </div>
-                            ))}
-                          </div>
-                          <div className="mt-1.5">{moreButton}</div>
-                        </>
-                      );
-                    })()}
-                  </>
-                )}
-                {errors.time && <Err>{errors.time}</Err>}
-              </fieldset>
-
+                          {shownDate && !shownPeriod && <p className="text-sm text-[#4a5a6e]">Choose morning, afternoon or evening.</p>}
+                          {shownPeriod && (
+                            <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
+                              {shownPeriod.items.map((s) => {
+                                const on = s.date === b.date && s.time === b.slotTime;
+                                return (
+                                  <button
+                                    key={`${s.date}-${s.time}`}
+                                    type="button"
+                                    aria-pressed={on}
+                                    onClick={() => pickSlot(s)}
+                                    className={cn(
+                                      "rounded-xl border-[1.5px] px-1 py-2.5 text-sm font-semibold transition-colors",
+                                      on ? "border-[#14243a] bg-[#fbecc4] text-[#14243a]" : "border-[#e1e8ee] bg-white hover:border-[#9fb0c2]",
+                                      ring,
+                                    )}
+                                  >
+                                    {s.time}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {errors.time && <Err>{errors.time}</Err>}
+                    </div>
+                  )}
+                </fieldset>
+                </>
+              )}
             </div>
           )}
 
-          {/* 2 · Find your record */}
-          {step === 2 && (
+          {/* 3 · Find your record */}
+          {step === 3 && (
             <div className="flex flex-col gap-3.5 lg:gap-[18px]">
               <div>
                 {b.hasCard ? (
@@ -1143,23 +1639,59 @@ export function BookingFlow() {
                   </button>
                 </p>
               </div>
-              <Box id="dob" label="Date of birth" error={errors.dob}>
-                <input
-                  id="dob"
-                  inputMode="numeric"
-                  autoComplete="bday"
-                  placeholder="MM / DD / YYYY"
-                  value={b.dob}
-                  onChange={(e) => {
-                    const dob = formatDob(e.target.value);
-                    set({ dob });
-                    const problem = dob.replace(/\D/g, "").length === 8 ? dobError(dob) : "";
-                    if (problem) setErrors((er) => ({ ...er, dob: problem }));
-                  }}
-                  aria-invalid={!!errors.dob}
-                  className={boxInput}
-                />
-              </Box>
+              <fieldset className="min-w-0">
+                <legend className="mx-1 mb-1.5 text-xs font-bold text-[#4a5a6e] lg:text-[13px]">Date of birth</legend>
+                <div className="grid grid-cols-[1.5fr_0.8fr_1.1fr] gap-2 lg:gap-2.5">
+                  <Dropdown
+                    id="dobMonth"
+                    ariaLabel="Birth month"
+                    placeholder="Month"
+                    value={b.dobMonth}
+                    options={MONTHS.map((m, i) => ({ value: String(i + 1), label: m }))}
+                    onChange={(dobMonth) => {
+                      set({ dobMonth });
+                      document.getElementById("dobDay")?.focus();
+                    }}
+                    invalid={!!errors.dob}
+                    className={cn(tallField, errors.dob && invalidRing, ring)}
+                  />
+                  <input
+                    id="dobDay"
+                    aria-label="Birth day"
+                    inputMode="numeric"
+                    autoComplete="bday-day"
+                    placeholder="DD"
+                    maxLength={2}
+                    value={b.dobDay}
+                    onChange={(e) => {
+                      const dobDay = digits(e.target.value).slice(0, 2);
+                      set({ dobDay });
+                      if (dobDay.length === 2) document.getElementById("dobYear")?.focus();
+                    }}
+                    aria-invalid={!!errors.dob}
+                    className={cn(tallField, errors.dob && invalidRing)}
+                  />
+                  <input
+                    id="dobYear"
+                    aria-label="Birth year"
+                    inputMode="numeric"
+                    autoComplete="bday-year"
+                    placeholder="YYYY"
+                    maxLength={4}
+                    value={b.dobYear}
+                    onChange={(e) => {
+                      const dobYear = digits(e.target.value).slice(0, 4);
+                      set({ dobYear });
+                      // All three in: check the date right away, as Bimble does.
+                      const problem = dobYear.length === 4 && b.dobMonth && b.dobDay ? dobError(b.dobMonth, b.dobDay, dobYear) : "";
+                      if (problem) setErrors((er) => ({ ...er, dob: problem }));
+                    }}
+                    aria-invalid={!!errors.dob}
+                    className={cn(tallField, errors.dob && invalidRing)}
+                  />
+                </div>
+                {errors.dob && <Err>{errors.dob}</Err>}
+              </fieldset>
               <div>
                 <Box id="cellPhone" label="Cell phone" error={errors.cellPhone}>
                   <input
@@ -1181,40 +1713,76 @@ export function BookingFlow() {
                     className={boxInput}
                   />
                 </Box>
-                {!(otp && verifyFor === "identity") && (
+                {!otp && !waiting && (
                   <p className="mx-1 mt-1.5 text-xs text-[#4a5a6e] lg:mt-2 lg:text-[13px]">
-                    {live ? "We’ll text a code to confirm it’s you. " : ""}Been here before? We’ll fill in the rest.
+                    {!live
+                      ? "Been here before? We’ll fill in the rest."
+                      : sending
+                        ? "Texting a code to this number…"
+                        : verifiedToken()
+                          ? "Phone confirmed."
+                          : "We’ll text a code to this number to confirm it’s you. Been here before? We’ll fill in the rest."}
                   </p>
                 )}
               </div>
-              {otp && verifyFor === "identity" && codePanel}
+              {waiting ? waitBox : codePanel}
             </div>
           )}
 
-          {/* 3 · Your details */}
-          {step === 3 && (
+          {/* 4 · Your details */}
+          {step === 4 && (
             <div className="flex flex-col gap-3 lg:gap-5">
               {welcome && <p className="rounded-2xl bg-[#e8f5ee] px-4 py-3 text-sm font-semibold text-[#1f5c3a]">{welcome}</p>}
               <span className="hidden text-base font-extrabold text-[#14243a] lg:block">About you</span>
-              <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-3 lg:gap-3">
+              <div className="grid grid-cols-2 gap-2.5 lg:gap-3">
                 <Box id="firstName" label="First name" error={errors.firstName}>
-                  <input id="firstName" autoComplete="given-name" value={b.firstName} onChange={(e) => set({ firstName: e.target.value })} aria-invalid={!!errors.firstName} className={boxInput} />
+                  <input
+                    id="firstName"
+                    autoComplete="given-name"
+                    autoCapitalize="words"
+                    value={b.firstName}
+                    onChange={(e) => set({ firstName: capitalizeName(e.target.value) })}
+                    aria-invalid={!!errors.firstName}
+                    className={boxInput}
+                  />
                 </Box>
                 <Box id="lastName" label="Last name" error={errors.lastName}>
-                  <input id="lastName" autoComplete="family-name" value={b.lastName} onChange={(e) => set({ lastName: e.target.value })} aria-invalid={!!errors.lastName} className={boxInput} />
-                </Box>
-                <Box id="sex" label="Sex" error={errors.sex} className="col-span-2 lg:col-span-1">
-                  <Dropdown
-                    id="sex"
-                    anchored
-                    value={b.sex}
-                    options={sexOptions.map((o) => ({ value: o.id, label: o.label }))}
-                    onChange={(v) => set({ sex: v })}
-                    invalid={!!errors.sex}
-                    className="text-base font-semibold text-[#14243a] outline-none"
+                  <input
+                    id="lastName"
+                    autoComplete="family-name"
+                    autoCapitalize="words"
+                    value={b.lastName}
+                    onChange={(e) => set({ lastName: capitalizeName(e.target.value) })}
+                    aria-invalid={!!errors.lastName}
+                    className={boxInput}
                   />
                 </Box>
               </div>
+              <fieldset className="min-w-0">
+                <legend className="mx-1 mb-1.5 text-xs font-bold text-[#4a5a6e] lg:text-[13px]">Gender</legend>
+                <div className="grid grid-cols-3 gap-2.5 lg:gap-3">
+                  {genderOptions.map((o) => {
+                    const on = b.gender === o.id;
+                    return (
+                      <button
+                        key={o.id}
+                        type="button"
+                        aria-pressed={on}
+                        onClick={() => set({ gender: o.id })}
+                        className={cn(
+                          // As tall as the name boxes beside it.
+                          "h-[62px] rounded-[14px] border-2 text-base font-bold transition-colors lg:h-16",
+                          on ? "border-[#c18700] bg-[#fbecc4] text-[#6b4a00]" : errors.gender ? "border-[#c92a2a] bg-white" : "border-[#e1e8ee] bg-white hover:border-[#9fb0c2]",
+                          ring,
+                        )}
+                      >
+                        {o.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {errors.gender && <Err>{errors.gender}</Err>}
+              </fieldset>
               <span className="mt-1 ml-1 block text-xs font-bold text-[#4a5a6e] lg:mt-1.5 lg:ml-0 lg:text-base lg:font-extrabold lg:text-[#14243a]">Home address</span>
               <Box id="addressLine" label="Street address" error={errors.addressLine}>
                 {live ? (
@@ -1229,7 +1797,7 @@ export function BookingFlow() {
                     invalid={!!errors.addressLine}
                     className={boxInput}
                     listClassName="-right-4 -left-4 mt-3"
-                    onChange={(text) => set({ addressLine: text })}
+                    onChange={(text) => set({ addressLine: text, latitude: null, longitude: null })}
                     onPick={(o) => {
                       set({ addressLine: o.label });
                       bimble
@@ -1241,6 +1809,8 @@ export function BookingFlow() {
                             ...(a.city ? { city: a.city } : {}),
                             ...(provinces.includes(a.province) ? { province: a.province } : {}),
                             ...(a.postalCode ? { postalCode: a.postalCode } : {}),
+                            latitude: a.latitude,
+                            longitude: a.longitude,
                           }),
                         )
                         .catch(() => {}); // the patient can still fill in the rest by hand
@@ -1262,7 +1832,7 @@ export function BookingFlow() {
                   <input id="unitNumber" placeholder="#" value={b.unitNumber} onChange={(e) => set({ unitNumber: e.target.value })} className={boxInput} />
                 </Box>
                 <Box id="city" label="City" error={errors.city}>
-                  <input id="city" autoComplete="address-level2" placeholder="Abbotsford" value={b.city} onChange={(e) => set({ city: e.target.value })} aria-invalid={!!errors.city} className={boxInput} />
+                  <input id="city" autoComplete="address-level2" placeholder="Abbotsford" value={b.city} onChange={(e) => set({ city: cleanCity(e.target.value) })} aria-invalid={!!errors.city} className={boxInput} />
                 </Box>
                 <Box id="province" label="Province" error={errors.province}>
                   <Dropdown
@@ -1291,129 +1861,157 @@ export function BookingFlow() {
             </div>
           )}
 
-          {/* 4 · Pharmacy */}
-          {step === 4 && (
-            <div className="flex flex-col gap-4">
+          {/* 5 · Pharmacy */}
+          {step === 5 && (
+            <div className="flex flex-col gap-5 lg:gap-6">
               <div>
-                <span className={qText}>Pick up or delivery?</span>
-                <div className="mb-6 lg:mb-8">
-                <div className="grid grid-cols-2 gap-2.5">
+                <span className={qText}>How do you want your prescription?</span>
+                <button
+                  type="button"
+                  aria-pressed={b.pharmacyChoice === "bimble"}
+                  onClick={() => b.pharmacyChoice !== "bimble" && set({ pharmacyChoice: "bimble", delivery: "delivery", ...clearPharmacy, pharmacyConsent: false })}
+                  className={cn(tile(b.pharmacyChoice === "bimble"), "w-full flex-row items-center gap-3.5 py-4 lg:py-[18px]")}
+                >
+                  <span className="grid size-11 shrink-0 place-items-center rounded-full bg-[#14243a] text-white">
+                    <TruckIcon />
+                  </span>
+                  <span className="flex min-w-0 flex-col gap-0.5">
+                    <b className="text-base lg:text-[17px]">Bimble Pharmacy</b>
+                    <span className={cn("text-[13px]", b.pharmacyChoice === "bimble" ? "text-[#6b4a00]" : "text-[#4a5a6e]")}>Fastest delivery available.</span>
+                  </span>
+                </button>
+                {errors.pharmacyChoice && <Err>{errors.pharmacyChoice}</Err>}
+              </div>
+              <div className="flex items-center gap-3 text-[13px] font-semibold text-[#6b7a8c] before:h-px before:flex-1 before:bg-[#e1e8ee] after:h-px after:flex-1 after:bg-[#e1e8ee]">
+                Or your own pharmacy
+              </div>
+              <div>
+                <div className="grid grid-cols-2 gap-2.5 lg:gap-3">
                   {(
                     [
                       ["pickup", "Pick up", "at the pharmacy"],
-                      ["delivery", "Home delivery", "to your address"],
+                      ["delivery", "Delivery", "from your pharmacy"],
                     ] as const
                   ).map(([v, title, sub]) => {
-                    const on = b.delivery === v;
+                    const on = b.pharmacyChoice === "own" && b.delivery === v;
                     return (
                       <button
                         key={v}
                         type="button"
                         aria-pressed={on}
-                        onClick={() => set({ delivery: v })}
-                        className={cn(
-                          "flex items-center gap-2.5 rounded-[14px] px-3.5 py-3 text-left transition-colors",
-                          on ? "border-2 border-[#14243a] bg-[#fbecc4]" : "border-[1.5px] border-[#e1e8ee] bg-white hover:border-[#9fb0c2]",
-                          ring,
-                        )}
+                        onClick={() => set({ pharmacyChoice: "own", delivery: v, ...(b.pharmacyChoice !== "own" ? { pharmacyConsent: false } : {}) })}
+                        className={tile(on)}
                       >
-                        <span className={cn("size-[22px] shrink-0 rounded-full bg-white", on ? "border-[7px] border-[#14243a]" : "border-2 border-[#9fb0c2]")} />
-                        <span className="flex flex-col gap-px">
-                          <b className="text-sm">{title}</b>
-                          <small className="text-xs text-[#4a5a6e]">{sub}</small>
-                        </span>
+                        <b className="text-[15px] lg:text-base">{title}</b>
+                        <span className={cn("text-xs lg:text-[13px]", on ? "text-[#6b4a00]" : "text-[#4a5a6e]")}>{sub}</span>
                       </button>
                     );
                   })}
                 </div>
                 {errors.delivery && <Err>{errors.delivery}</Err>}
-                </div>
-                <label htmlFor="pharmacySearch" className={qText}>
-                  Which pharmacy?
-                </label>
-                <div className="relative">
-                  <SearchIcon />
-                  <input
-                    id="pharmacySearch"
-                    placeholder={live ? "Search name, street or city" : "Pharmacy name and city"}
-                    value={live ? pharmacyQuery : b.pharmacy}
-                    onChange={(e) => (live ? setPharmacyQuery(e.target.value) : set({ pharmacy: e.target.value }))}
-                    className={cn(field, "pl-11 lg:pl-12")}
-                  />
-                </div>
               </div>
-              {live && (
+              {b.pharmacyChoice === "own" && (
                 <div className="flex flex-col gap-2">
-                  {(() => {
-                    const typed = pharmacyQuery.trim();
-                    const results = typed.length >= 2 ? pharmacySearch.items.slice(0, 5) : [];
-                    const selectedCard: BimblePharmacy | null = b.pharmacy
-                      ? { id: "selected", name: b.pharmacy, address: b.pharmacyAddress, city: b.pharmacyCity, province: "", postalCode: b.pharmacyPostalCode, phone: b.pharmacyPhone }
-                      : null;
-                    const same = (p: BimblePharmacy) => p.name === b.pharmacy && p.address === b.pharmacyAddress;
-                    const list: BimblePharmacy[] = [];
-                    if (selectedCard) list.push(selectedCard);
-                    if (savedPharmacy && !(selectedCard && savedPharmacy.name === selectedCard.name)) list.push(savedPharmacy);
-                    for (const p of results) if (!list.some((x) => x.name === p.name && x.address === p.address)) list.push(p);
-                    return (
-                      <>
-                        {list.map((p) => {
-                          const on = same(p);
-                          const lastTime = savedPharmacy && p.name === savedPharmacy.name && p.address === savedPharmacy.address;
-                          return (
-                            <button
-                              key={`${p.id}-${p.name}-${p.address}`}
-                              type="button"
-                              aria-pressed={on}
-                              onClick={() => (on ? set({ pharmacy: "", pharmacyAddress: "", pharmacyCity: "", pharmacyPostalCode: "", pharmacyPhone: "", pharmacyConsent: false }) : choosePharmacy(p))}
-                              className={cn(
-                                "flex w-full items-center gap-3 rounded-[14px] px-3.5 py-3 text-left lg:px-4 lg:py-3.5",
-                                on ? "border-2 border-[#14243a] bg-[#f5f9fc]" : "border-[1.5px] border-[#e1e8ee] bg-white hover:border-[#9fb0c2]",
-                                ring,
-                              )}
-                            >
-                              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                                <b className="text-[15px] lg:text-base">{p.name}</b>
-                                <small className="truncate text-xs text-[#4a5a6e] lg:text-[13px]">
-                                  {[p.address, p.city].filter(Boolean).join(", ") || "Address not listed"}
-                                  {lastTime ? " · used last time" : ""}
-                                </small>
-                              </span>
-                              {on && (
-                                <span className="grid size-6 shrink-0 place-items-center rounded-full bg-[#14243a] text-white">
-                                  <CheckIcon className="size-3.5" strokeWidth={3} />
+                  <label htmlFor="pharmacySearch" className={qText}>
+                    Which pharmacy?
+                  </label>
+                  <div className="relative">
+                    <SearchIcon />
+                    <input
+                      id="pharmacySearch"
+                      placeholder={live ? "Search name, street or city" : "Pharmacy name and city"}
+                      value={live ? pharmacyQuery : b.pharmacy}
+                      onChange={(e) => (live ? setPharmacyQuery(e.target.value) : set({ pharmacy: e.target.value }))}
+                      aria-invalid={!!errors.pharmacy}
+                      className={cn(field, "pl-11 lg:pl-12", errors.pharmacy && invalidRing)}
+                    />
+                  </div>
+                  {live &&
+                    (() => {
+                      const typed = pharmacyQuery.trim();
+                      const results = typed.length >= 2 ? pharmacySearch.items.slice(0, 5) : [];
+                      const selectedCard: BimblePharmacy | null = b.pharmacy
+                        ? { id: "selected", name: b.pharmacy, address: b.pharmacyAddress, city: b.pharmacyCity, province: "", postalCode: b.pharmacyPostalCode, phone: b.pharmacyPhone }
+                        : null;
+                      const same = (p: BimblePharmacy) => p.name === b.pharmacy && p.address === b.pharmacyAddress;
+                      const list: BimblePharmacy[] = [];
+                      if (selectedCard) list.push(selectedCard);
+                      if (savedPharmacy && !(selectedCard && savedPharmacy.name === selectedCard.name)) list.push(savedPharmacy);
+                      for (const p of results) if (!list.some((x) => x.name === p.name && x.address === p.address)) list.push(p);
+                      return (
+                        <>
+                          {list.map((p) => {
+                            const on = same(p);
+                            const lastTime = savedPharmacy && p.name === savedPharmacy.name && p.address === savedPharmacy.address;
+                            return (
+                              <button
+                                key={`${p.id}-${p.name}-${p.address}`}
+                                type="button"
+                                aria-pressed={on}
+                                onClick={() => (on ? set(clearPharmacy) : choosePharmacy(p))}
+                                className={cn(
+                                  "flex w-full items-center gap-3 rounded-[14px] px-3.5 py-3 text-left lg:px-4 lg:py-3.5",
+                                  on ? "border-2 border-[#c18700] bg-[#fbecc4]" : "border-[1.5px] border-[#e1e8ee] bg-white hover:border-[#9fb0c2]",
+                                  ring,
+                                )}
+                              >
+                                <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                                  <b className="text-[15px] lg:text-base">{p.name}</b>
+                                  <small className="truncate text-xs text-[#4a5a6e] lg:text-[13px]">
+                                    {[p.address, p.city].filter(Boolean).join(", ") || "Address not listed"}
+                                    {lastTime ? " · used last time" : ""}
+                                  </small>
                                 </span>
-                              )}
+                                {on && (
+                                  <span className="grid size-6 shrink-0 place-items-center rounded-full bg-[#14243a] text-white">
+                                    <CheckIcon className="size-3.5" strokeWidth={3} />
+                                  </span>
+                                )}
+                              </button>
+                            );
+                          })}
+                          {typed.length >= 2 && pharmacySearch.loading && !results.length && <p className="px-1 text-sm text-[#4a5a6e]">Searching pharmacies…</p>}
+                          {typed.length >= 2 && !pharmacySearch.loading && !results.length && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                set({ ...clearPharmacy, pharmacy: typed });
+                                setPharmacyQuery("");
+                              }}
+                              className={cn("rounded-[14px] border-[1.5px] border-dashed border-[#9fb0c2] px-3.5 py-3 text-left text-sm", ring)}
+                            >
+                              {pharmacySearch.failed ? "Pharmacy search isn’t available right now. " : "No matching pharmacy. "}
+                              <b className="text-[#14243a]">Use “{typed}”</b>
                             </button>
-                          );
-                        })}
-                        {typed.length >= 2 && pharmacySearch.loading && !results.length && <p className="px-1 text-sm text-[#4a5a6e]">Searching pharmacies…</p>}
-                        {typed.length >= 2 && !pharmacySearch.loading && !results.length && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              set({ pharmacy: typed, pharmacyAddress: "", pharmacyCity: "", pharmacyPostalCode: "", pharmacyPhone: "" });
-                              setPharmacyQuery("");
-                            }}
-                            className={cn("rounded-[14px] border-[1.5px] border-dashed border-[#9fb0c2] px-3.5 py-3 text-left text-sm", ring)}
-                          >
-                            {pharmacySearch.failed ? "Pharmacy search isn’t available right now. " : "No matching pharmacy. "}
-                            <b className="text-[#14243a]">Use “{typed}”</b>
-                          </button>
-                        )}
-                      </>
-                    );
-                  })()}
+                          )}
+                        </>
+                      );
+                    })()}
+                  {errors.pharmacy && <Err>{errors.pharmacy}</Err>}
                 </div>
               )}
-              <button type="button" onClick={skipPharmacy} className={cn("self-start text-[13px] font-semibold text-[#4a5a6e] underline lg:text-sm", ring)}>
-                Skip — I don’t need a pharmacy
-              </button>
+              {b.pharmacyChoice && (
+                <div>
+                  <label className="flex items-start gap-2.5 text-[13px] leading-[1.45] text-[#3d4d61] lg:text-sm">
+                    <input
+                      type="checkbox"
+                      checked={b.pharmacyConsent}
+                      onChange={(e) => set({ pharmacyConsent: e.target.checked })}
+                      className="m-0 mt-px size-5 shrink-0 accent-[#14243a]"
+                    />
+                    <span>
+                      I consent to the clinic securely sending my prescription and required information to{" "}
+                      {b.pharmacyChoice === "bimble" ? "Bimble Pharmacy" : "my selected pharmacy"}.
+                    </span>
+                  </label>
+                  {errors.pharmacyConsent && <Err>{errors.pharmacyConsent}</Err>}
+                </div>
+              )}
             </div>
           )}
 
-          {/* 5 · Your health */}
-          {step === 5 && (
+          {/* 6 · Your health */}
+          {step === 6 && (
             <div className="flex flex-col gap-[18px] lg:gap-7">
               <div>
                 <label htmlFor="allergies" className={qText}>
@@ -1438,9 +2036,9 @@ export function BookingFlow() {
                     aria-label="Emergency contact name"
                     placeholder="Name"
                     value={b.emergencyName}
-                    onChange={(e) => set({ emergencyName: e.target.value })}
+                    onChange={(e) => set({ emergencyName: capitalizeName(e.target.value) })}
                     aria-invalid={!!errors.emergencyName}
-                    className={cn(field, errors.emergencyName && "shadow-[inset_0_0_0_2px_#c92a2a]")}
+                    className={cn(field, errors.emergencyName && invalidRing)}
                   />
                   {errors.emergencyName && <Err>{errors.emergencyName}</Err>}
                   <div className="grid gap-2 sm:grid-cols-2 lg:gap-2.5">
@@ -1460,7 +2058,7 @@ export function BookingFlow() {
                       value={b.emergencyPhone}
                       onChange={(e) => set({ emergencyPhone: formatPhone(e.target.value) })}
                       aria-invalid={!!errors.emergencyPhone}
-                      className={cn(field, errors.emergencyPhone && "shadow-[inset_0_0_0_2px_#c92a2a]")}
+                      className={cn(field, errors.emergencyPhone && invalidRing)}
                     />
                   </div>
                   {errors.emergencyPhone && <Err>{errors.emergencyPhone}</Err>}
@@ -1472,14 +2070,53 @@ export function BookingFlow() {
                 </label>
                 <textarea
                   id="notes"
-                  maxLength={500}
-                  placeholder="Anything else the doctor should know?"
+                  maxLength={1000}
+                  placeholder="When it started, what you’ve tried, anything else the doctor should know"
                   value={b.notes}
                   onChange={(e) => set({ notes: e.target.value })}
-                  className="h-20 w-full resize-none rounded-[14px] border-0 bg-[#f0f4f7] px-4 py-3 text-[15px] text-[#14243a] outline-none placeholder:text-[#6b7a8c] focus:shadow-[inset_0_0_0_2px_#14243a] lg:h-24"
+                  className="h-24 w-full resize-none rounded-[14px] border-0 bg-[#f0f4f7] px-4 py-3 text-[15px] text-[#14243a] outline-none placeholder:text-[#6b7a8c] focus:shadow-[inset_0_0_0_2px_#14243a] lg:h-28"
                 />
+                <p className="mx-1 mt-1 text-right text-xs text-[#6b7a8c] tabular-nums">{b.notes.length} / 1000</p>
               </div>
             </div>
+          )}
+
+          {/* 7 · Review */}
+          {step === 7 && (
+            <dl className="rounded-3xl border-[1.5px] border-[#e1e8ee] px-5 py-1 lg:px-7">
+              {(
+                [
+                  ["Reason", reasonShown, "", 1],
+                  ["Visit", methodLabel(b.method), "The doctor contacts you", 1],
+                  ["Doctor", b.doctorName, b.doctorMode === "any" ? "Any doctor, soonest first" : "", 2],
+                  ["When", b.date ? `${longDate(b.date)} · ${b.slotTime}` : "", "", 2],
+                  ["Patient", [b.firstName, b.lastName].filter(Boolean).join(" "), [genderLabel, dobShown].filter(Boolean).join(" · "), 4],
+                  [b.hasCard ? "Health card" : "Email", b.hasCard ? b.cardNumber : b.email, "", 3],
+                  ["Cell phone", b.cellPhone, "", 3],
+                  ["Address", [b.unitNumber ? `${b.unitNumber}-${b.addressLine}` : b.addressLine, b.city, `${b.province} ${b.postalCode.toUpperCase()}`].filter((x) => x.trim()).join(", "), "", 4],
+                  ...(noPharmacy
+                    ? []
+                    : ([["Pharmacy", pharmacyLabel, b.pharmacyChoice === "own" ? [b.pharmacyAddress, b.pharmacyCity].filter(Boolean).join(", ") : "", 5]] as const)),
+                  ["Allergies", b.allergies.trim() || "No known allergies", "", 6],
+                  ["Emergency contact", b.emergencyName.trim() ? `${b.emergencyName}${b.emergencyRelation ? ` (${b.emergencyRelation})` : ""} · ${b.emergencyPhone}` : "None", "", 6],
+                  ...(b.notes.trim() ? ([["Note", b.notes.trim().length > 90 ? `${b.notes.trim().slice(0, 90)}…` : b.notes.trim(), "", 6]] as const) : []),
+                ] as const
+              ).map(([k, v, sub, go], i) => (
+                <div
+                  key={k}
+                  className={cn("grid grid-cols-[1fr_auto] items-baseline gap-x-4 gap-y-0.5 py-3.5 sm:grid-cols-[150px_1fr_auto] lg:grid-cols-[170px_1fr_auto]", i > 0 && "border-t border-[#e8eef2]")}
+                >
+                  <dt className="text-sm text-[#4a5a6e] max-sm:col-span-2">{k}</dt>
+                  <dd className="min-w-0 text-[15px] font-bold break-words lg:text-base">
+                    {v || "—"}
+                    {sub && <span className="block text-[13px] font-medium text-[#4a5a6e]">{sub}</span>}
+                  </dd>
+                  <button type="button" onClick={() => goTo(go)} disabled={busy} className={cn("text-[13px] font-bold underline disabled:opacity-50", ring)}>
+                    Change
+                  </button>
+                </div>
+              ))}
+            </dl>
           )}
 
           {/* Booked */}
@@ -1495,10 +2132,10 @@ export function BookingFlow() {
                 {(
                   [
                     ["Type", methodLabel(b.method)],
-                    ["When", b.date ? `${dayLabel(b.date)} · ${b.slotTime}` : ""],
-                    ["Doctor", b.provider],
-                    ["Reason", b.reason],
-                    ["Pharmacy", b.pharmacy ? [b.pharmacy, deliveryLabel].filter(Boolean).join(" · ") : "None"],
+                    ["Doctor", b.doctorName],
+                    ["When", b.date ? `${longDate(b.date)} · ${b.slotTime}` : ""],
+                    ["Reason", reasonShown],
+                    ["Pharmacy", pharmacyLabel],
                     ["Reference", reference ? `#${reference}` : ""],
                   ] as const
                 ).map(([k, v], i) => (
@@ -1519,6 +2156,7 @@ export function BookingFlow() {
                   ))}
                 </ol>
               </div>
+              <BeforeYourVisit token={booked.token} appointmentId={booked.appointmentId} />
             </div>
           )}
 
@@ -1530,34 +2168,15 @@ export function BookingFlow() {
               step === "booked" ? "lg:mt-0 lg:pt-6" : "lg:pt-10",
             )}
           >
-            {step === 4 && b.pharmacy && (
-              <label className="mb-3 flex items-start gap-2.5 text-xs leading-[1.45] text-[#3d4d61] lg:items-center lg:text-[13px]">
-                <input
-                  type="checkbox"
-                  checked={b.pharmacyConsent}
-                  onChange={(e) => set({ pharmacyConsent: e.target.checked })}
-                  className="m-0 size-5 shrink-0 accent-[#14243a]"
-                />
-                <span>Send any prescription from this visit to this pharmacy.</span>
-              </label>
-            )}
-            {step === 4 && errors.pharmacyConsent && <Err>{errors.pharmacyConsent}</Err>}
-            {step === 5 && otp && verifyFor === "book" && <div className="mb-4">{codePanel}</div>}
-            {step === 5 && (
-              <>
-                <label className="mb-3 flex items-start gap-2.5 text-xs leading-[1.45] text-[#3d4d61] lg:items-center lg:text-[13px]">
-                  <input type="checkbox" checked={b.terms} onChange={(e) => set({ terms: e.target.checked })} className="m-0 size-5 shrink-0 accent-[#14243a]" />
-                  <span>I’ll be in BC for the visit and accept {clinicLocation.clinic}’s terms &amp; privacy policy.</span>
-                </label>
-                {errors.terms && <Err>{errors.terms}</Err>}
-              </>
-            )}
+            {step === 7 && (waiting ? <div className="mb-4">{waitBox}</div> : otp && <div className="mb-4">{codePanel}</div>)}
             {step === "booked" ? (
               <div className="flex flex-col gap-2.5 lg:flex-row lg:justify-between">
-                <button type="button" onClick={downloadCalendar} className={cn("inline-flex h-14 items-center justify-center gap-2 rounded-2xl bg-[#f0f4f7] px-6 text-base font-bold hover:bg-[#e4eaef] lg:h-[58px]", ring)}>
-                  <CalendarIcon className="size-[18px]" /> Add to calendar
-                </button>
-                <Link href="/" className={cn(primary, ring)}>
+                {b.date && (
+                  <button type="button" onClick={downloadCalendar} className={cn("inline-flex h-14 items-center justify-center gap-2 rounded-2xl bg-[#f0f4f7] px-6 text-base font-bold hover:bg-[#e4eaef] lg:h-[58px]", ring)}>
+                    <CalendarIcon className="size-[18px]" /> Add to calendar
+                  </button>
+                )}
+                <Link href="/" className={cn(primary, "lg:ml-auto", ring)}>
                   Done
                 </Link>
               </div>
@@ -1568,29 +2187,31 @@ export function BookingFlow() {
                     ← Back
                   </button>
                 )}
-                {step === 1 && visitSummary && (
+                {step <= 2 && visitSummary && (
                   // Everything chosen so far, next to Next: visit type, day and time, reason.
                   <span className="hidden min-w-0 flex-1 text-right text-sm leading-snug text-[#4a5a6e] lg:block">{visitSummary}</span>
                 )}
                 <button
                   type="button"
                   disabled={busy}
-                  onClick={awaitingCode ? () => void verifyCode() : next}
-                  className={cn(primary, "w-full lg:ml-auto lg:w-auto", step === 1 && "max-lg:justify-between", step === 5 && gold, ring)}
+                  onClick={awaitingCode ? () => void verifyCode() : () => void next()}
+                  className={cn(primary, "w-full lg:ml-auto lg:w-auto", step <= 2 && "max-lg:justify-between", step === 7 && gold, ring)}
                 >
-                  {step === 1 ? (
+                  {step <= 2 ? (
                     <>
                       <span className="min-w-0 truncate text-[13px] font-semibold text-[#c8d3de] lg:hidden">{visitSummary}</span>
-                      <span>Next →</span>
+                      <span>{matching ? "Matching…" : busy ? "Please wait…" : "Next →"}</span>
                     </>
                   ) : awaitingCode ? (
-                    busy ? "Checking…" : step === 5 ? "Verify and book" : "Verify →"
-                  ) : step === 2 ? (
-                    busy ? (live ? (verifiedToken() ? "Checking…" : "Sending code…") : "Next") : live ? (verifiedToken() ? "Next →" : "Text me a code") : "Next →"
-                  ) : step === 4 ? (
-                    "Next · Your health →"
+                    busy ? "Please wait…" : step === 7 ? "Verify and book" : "Next →"
+                  ) : step === 3 ? (
+                    busy ? "Please wait…" : "Next →"
                   ) : step === 5 ? (
-                    busy ? "Booking…" : `Book ${b.slotTime || "appointment"}`
+                    "Next · Your health →"
+                  ) : step === 6 ? (
+                    "Review →"
+                  ) : step === 7 ? (
+                    busy ? "Booking…" : `Book ${b.date ? `${shortDate(b.date)}, ` : ""}${b.slotTime}`
                   ) : (
                     "Next →"
                   )}
@@ -1615,7 +2236,7 @@ function Box({ id, label, error, className, children }: { id: string; label: Rea
       <div
         className={cn(
           "relative flex h-[62px] flex-col justify-center gap-0.5 rounded-[14px] bg-[#f0f4f7] px-4 focus-within:shadow-[inset_0_0_0_2px_#14243a] lg:h-[64px]",
-          error && "shadow-[inset_0_0_0_2px_#c92a2a]",
+          error && invalidRing,
         )}
       >
         <label htmlFor={id} className="text-xs font-bold text-[#4a5a6e]">
@@ -1686,7 +2307,7 @@ function CodeInput({ value, onChange, onComplete, invalid }: { value: string; on
           }}
           className={cn(
             "size-12 rounded-xl border-0 bg-[#f0f4f7] text-center text-xl font-extrabold text-[#14243a] outline-none focus:shadow-[inset_0_0_0_2px_#14243a]",
-            invalid && "shadow-[inset_0_0_0_2px_#c92a2a]",
+            invalid && invalidRing,
           )}
         />
       ))}
@@ -1733,26 +2354,45 @@ function EmergencyDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-function MethodIcon({ id }: { id: string }) {
-  const common = { viewBox: "0 0 24 24", className: "size-6 shrink-0 fill-none stroke-current stroke-2 [stroke-linecap:round] [stroke-linejoin:round] lg:size-[26px]", "aria-hidden": true };
-  if (id === "video")
+/** Icon for the visit-type card. */
+function TileIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="size-6 shrink-0 fill-none stroke-current stroke-2 [stroke-linecap:round] [stroke-linejoin:round]">
+      <rect x="2" y="6" width="14" height="12" rx="2" />
+      <path d="M16 10l6-3v10l-6-3z" />
+    </svg>
+  );
+}
+
+/** Sunrise, sun and moon for the parts of the day, as on Bimble. */
+function PeriodIcon({ name, color }: { name: string; color?: string }) {
+  const common = { viewBox: "0 0 24 24", className: "size-5 fill-none stroke-current stroke-2 [stroke-linecap:round] [stroke-linejoin:round]", style: color ? { color } : undefined, "aria-hidden": true };
+  if (name === "Morning")
     return (
       <svg {...common}>
-        <rect x="2" y="6" width="14" height="12" rx="2" />
-        <path d="M16 10l6-3v10l-6-3z" />
+        <path d="M17 18a5 5 0 0 0-10 0M12 2v7M4.2 10.2l1.4 1.4M1 18h2M21 18h2M18.4 11.6l1.4-1.4M23 22H1M8 6l4-4 4 4" />
       </svg>
     );
-  if (id === "phone")
+  if (name === "Afternoon")
     return (
       <svg {...common}>
-        <path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8 9.8a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.5c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z" />
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4" />
       </svg>
     );
   return (
     <svg {...common}>
-      <path d="M3 21h18" />
-      <path d="M5 21V7l7-4 7 4v14" />
-      <path d="M10 21v-5h4v5" />
+      <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z" />
+    </svg>
+  );
+}
+
+function TruckIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="size-5 fill-none stroke-current stroke-2 [stroke-linecap:round] [stroke-linejoin:round]">
+      <path d="M1 3h15v13H1zM16 8h4l3 3v5h-7z" />
+      <circle cx="5.5" cy="18.5" r="2.5" />
+      <circle cx="18.5" cy="18.5" r="2.5" />
     </svg>
   );
 }

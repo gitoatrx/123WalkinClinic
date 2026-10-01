@@ -1,4 +1,4 @@
-// Booking flow data and helpers ("Short & Friendly": five short steps).
+// Booking flow data and helpers (six short steps, the same flow as Bimble's own booking).
 // With Bimble connected (lib/bimble.ts) reasons, doctors, dates and times come
 // from the clinic's Bimble schedule and the booking is made in Bimble. Without it
 // this is a demo: open times are simulated and nothing is sent anywhere. The site
@@ -8,66 +8,79 @@ export const clinicLocation = {
   name: "Abbotsford",
   clinic: "123 Walk-In Clinic",
   address: "108-2777 Gladwin Rd., BC",
+  street: "108-2777 Gladwin Rd.",
   timeZone: "America/Vancouver",
   /** The demo's first open day, this many days from today. */
-  daysUntilAvailable: 3,
+  daysUntilAvailable: 0,
 };
 
-/** Visit methods in the order the booking page offers them. */
-export const methods = [
-  { id: "video", label: "Video call", short: "Video" },
-  { id: "phone", label: "Phone call", short: "Phone" },
-  { id: "in-clinic", label: "In clinic", short: "Clinic" },
-] as const;
+/** Visit types the booking page offers, as Bimble names them. The clinic books virtual visits only. */
+export const methods = [{ id: "virtual", label: "Virtual", sub: "From anywhere you are" }] as const;
 export type MethodId = (typeof methods)[number]["id"];
 
-export const sexOptions = [
-  { id: "F", label: "Female" },
-  { id: "M", label: "Male" },
-  { id: "O", label: "Other" },
-  { id: "U", label: "Prefer not to say" },
+/** As in Bimble: three buttons; "Others" is saved as "Other". */
+export const genderOptions = [
+  { id: "M", label: "Male", value: "Male" },
+  { id: "F", label: "Female", value: "Female" },
+  { id: "O", label: "Others", value: "Other" },
 ];
 
 export const provinces = ["BC", "AB", "SK", "MB", "ON", "QC", "NB", "NS", "PE", "NL", "YT", "NT", "NU"];
 
 export const relationOptions = ["Spouse / Partner", "Parent", "Child", "Sibling", "Relative", "Friend", "Caregiver", "Other"];
 
+export const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTHS_LONG = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
 export type BookingData = {
   // 1 · Your visit
   method: MethodId | "";
+  // 2 · Doctor & time
+  /** "any": the soonest open time with any doctor, booked as is; "choose": a doctor, then a date and time. */
+  doctorMode: "" | "any" | "choose";
+  /** The doctor the booking is assigned to (chosen, or the one with the soonest time). */
+  doctorId: number | null;
+  doctorName: string;
   date: string;
   /** Minutes after midnight of the chosen time. */
   time: number | null;
   /** Bimble's slot label ("9:15 AM") and the doctor who has that time. */
   slotTime: string;
   slotDoctorId: number | null;
-  /** Bimble doctor id, or "any" for the first available doctor. */
-  providerId: string;
-  provider: string;
-  /** What the patient sees in the field, e.g. "Doctor’s note". */
+  /** What the patient sees in the field, e.g. "Sore throat". */
   reason: string;
   /** Bimble service behind the chosen reason (live mode picks reasons from Bimble's list). */
   reasonServiceId: number | null;
   /** Bimble's own name for that reason ("Sick note or medical form"); sent to Bimble. */
   reasonBimble: string;
+  /** "Something else": the patient describes the reason in their own words. */
+  reasonOther: boolean;
+  otherText: string;
   // 2 · Find your record
   hasCard: boolean;
   cardNumber: string;
   email: string;
-  /** "MM / DD / YYYY", as typed (month first, as on Bimble). */
-  dob: string;
+  /** Date of birth in three boxes, as on Bimble: month "1"–"12", day, 4-digit year. */
+  dobMonth: string;
+  dobDay: string;
+  dobYear: string;
   cellPhone: string;
   // 3 · Your details
   firstName: string;
   lastName: string;
-  sex: string;
+  gender: string;
   addressLine: string;
   unitNumber: string;
   city: string;
   province: string;
   postalCode: string;
+  /** From the picked address; Bimble uses them to choose the nearest Bimble Pharmacy. */
+  latitude: number | null;
+  longitude: number | null;
   // 4 · Pharmacy
-  /** Empty until the patient chooses; only asked when a pharmacy is chosen. */
+  /** Bimble Pharmacy (delivered), or the patient's own pharmacy. */
+  pharmacyChoice: "" | "bimble" | "own";
+  /** Own pharmacy only: pick up there, or have it delivered. */
   delivery: "" | "delivery" | "pickup";
   pharmacy: string;
   /** The pharmacy picked from the directory (empty when only a name was typed). */
@@ -84,34 +97,40 @@ export type BookingData = {
   emergencyRelation: string;
   emergencyPhone: string;
   notes: string;
-  /** In BC for the visit, and the terms & privacy policy accepted. */
-  terms: boolean;
 };
 
 export const emptyBooking: BookingData = {
-  method: "",
+  method: "virtual",
+  doctorMode: "",
+  doctorId: null,
+  doctorName: "",
   date: "",
   time: null,
   slotTime: "",
   slotDoctorId: null,
-  providerId: "any",
-  provider: "First available",
   reason: "",
   reasonServiceId: null,
   reasonBimble: "",
+  reasonOther: false,
+  otherText: "",
   hasCard: true,
   cardNumber: "",
   email: "",
-  dob: "",
+  dobMonth: "",
+  dobDay: "",
+  dobYear: "",
   cellPhone: "",
   firstName: "",
   lastName: "",
-  sex: "",
+  gender: "",
   addressLine: "",
   unitNumber: "",
   city: "",
   province: "BC",
   postalCode: "",
+  latitude: null,
+  longitude: null,
+  pharmacyChoice: "",
   delivery: "",
   pharmacy: "",
   pharmacyAddress: "",
@@ -125,7 +144,6 @@ export const emptyBooking: BookingData = {
   emergencyRelation: "",
   emergencyPhone: "",
   notes: "",
-  terms: false,
 };
 
 /**
@@ -155,40 +173,38 @@ export function formatPhone(value: string) {
   return d;
 }
 
-/** "05151990" → "05 / 15 / 1990", formatted as it is typed. */
-export function formatDob(value: string) {
-  const d = value.replace(/\D/g, "").slice(0, 8);
-  if (d.length > 4) return `${d.slice(0, 2)} / ${d.slice(2, 4)} / ${d.slice(4)}`;
-  if (d.length > 2) return `${d.slice(0, 2)} / ${d.slice(2)}`;
-  return d;
+/**
+ * Names as Bimble takes them (lib/form-validation.ts normalizeNameInput): letters, spaces,
+ * apostrophes and hyphens only, single spaces, and a capital first letter.
+ */
+export function capitalizeName(value: string) {
+  const v = value.replace(/[^\p{L}\s'’-]/gu, "").replace(/\s{2,}/g, " ").replace(/^\s+/, "");
+  return v.charAt(0).toUpperCase() + v.slice(1);
 }
 
-/** "05 / 15 / 1990" → "1990-05-15", or "" when it is not a real past date. */
-export function dobToIso(value: string) {
-  const d = value.replace(/\D/g, "");
-  if (d.length !== 8) return "";
-  const month = Number(d.slice(0, 2));
-  const day = Number(d.slice(2, 4));
-  const year = Number(d.slice(4));
-  const dt = new Date(Date.UTC(year, month - 1, day));
-  if (dt.getUTCFullYear() !== year || dt.getUTCMonth() !== month - 1 || dt.getUTCDate() !== day) return "";
-  if (year < 1900 || dt.getTime() > Date.now()) return "";
-  return `${year}-${pad(month)}-${pad(day)}`;
+/** Month, day and year boxes → "1990-05-15", or "" until all three are filled in. */
+export function dobToIso(month: string, day: string, year: string) {
+  if (!month || !day || year.length !== 4) return "";
+  return `${year}-${pad(Number(month))}-${pad(Number(day))}`;
 }
 
-/** What is wrong with a typed date of birth, in Bimble's words; "" when it is fine. */
-export function dobError(value: string) {
-  const d = value.replace(/\D/g, "");
-  if (d.length !== 8) return "Enter your date of birth as MM / DD / YYYY.";
-  const month = Number(d.slice(0, 2));
-  const day = Number(d.slice(2, 4));
-  const year = Number(d.slice(4));
-  const dt = new Date(Date.UTC(year, month - 1, day));
-  if (dt.getUTCFullYear() !== year || dt.getUTCMonth() !== month - 1 || dt.getUTCDate() !== day || year < 1900) {
-    return "Enter a valid date of birth.";
-  }
-  if (dt.getTime() > Date.now()) return "Date of birth cannot be in the future.";
+/** What is wrong with the date of birth, in Bimble's words (lib/date-format.ts); "" when it is fine. */
+export function dobError(month: string, day: string, year: string) {
+  if (!month || !day || year.length !== 4) return "Date of birth is required.";
+  const m = Number(month);
+  const d = Number(day);
+  const y = Number(year);
+  const max = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  if (d < 1 || y < 1900) return "Date of birth must be a real calendar date.";
+  if (d > max) return m === 2 ? `February can only have ${max} days.` : `${MONTHS_LONG[m - 1]} can only have ${max} days.`;
+  if (Date.UTC(y, m - 1, d) > Date.now()) return "Date of birth cannot be in the future.";
   return "";
+}
+
+/** "May 15, 1990" for the review screen. */
+export function dobLabel(month: string, day: string, year: string) {
+  if (!month || !day || year.length !== 4) return "";
+  return `${MONTHS_LONG[Number(month) - 1]} ${Number(day)}, ${year}`;
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -198,10 +214,17 @@ export function clinicToday() {
   return new Intl.DateTimeFormat("en-CA", { timeZone: clinicLocation.timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 }
 
+/** Minutes after midnight now, at the clinic. */
+export function clinicNowMinutes() {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: clinicLocation.timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date());
+  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? 0);
+  return get("hour") * 60 + get("minute");
+}
+
 /** The demo's bookable days, starting when its first availability opens. */
 export function availableDates(): string[] {
   const [y, m, d] = clinicToday().split("-").map(Number);
-  return Array.from({ length: 8 }, (_, i) => {
+  return Array.from({ length: 7 }, (_, i) => {
     const dt = new Date(Date.UTC(y, m - 1, d + clinicLocation.daysUntilAvailable + i));
     return dt.toISOString().slice(0, 10);
   });
@@ -216,10 +239,11 @@ function hash(input: string) {
   return h >>> 0;
 }
 
-/** The demo's open times (15-minute steps, 9:00 AM–5:00 PM), stable per date. */
+/** The demo's open times (15-minute steps, 9:00 AM–8:00 PM), stable per date; today's start 30 minutes from now, as on Bimble. */
 export function availableTimes(date: string, method: string): number[] {
+  const earliest = date === clinicToday() ? clinicNowMinutes() + 30 : 0;
   const times: number[] = [];
-  for (let t = 9 * 60; t < 17 * 60; t += 15) if (hash(`${date}-${method}-${t}`) % 10 >= 4) times.push(t);
+  for (let t = 9 * 60; t < 20 * 60; t += 15) if (t >= earliest && hash(`${date}-${method}-${t}`) % 10 >= 5) times.push(t);
   return times;
 }
 
@@ -229,42 +253,60 @@ export function timeLabel(minutes: number) {
   return `${h % 12 === 0 ? 12 : h % 12}:${pad(minutes % 60)} ${h >= 12 ? "PM" : "AM"}`;
 }
 
-/** "Today", "Tomorrow" or "Wed 30" for a YYYY-MM-DD date. */
-export function dayLabel(date: string) {
-  const today = clinicToday();
-  const days = Math.round((Date.parse(date) - Date.parse(today)) / 86_400_000);
-  if (days === 0) return "Today";
-  if (days === 1) return "Tomorrow";
+const utc = (date: string) => {
   const [y, m, d] = date.split("-").map(Number);
-  return `${new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-US", { timeZone: "UTC", weekday: "short" })} ${d}`;
+  return new Date(Date.UTC(y, m - 1, d));
+};
+
+/** A date card as Bimble shows it: weekday, day and month ("THU", "1", "OCT"). */
+export function dateParts(date: string) {
+  const dt = utc(date);
+  return {
+    weekday: dt.toLocaleDateString("en-US", { timeZone: "UTC", weekday: "short" }),
+    day: dt.getUTCDate(),
+    month: dt.toLocaleDateString("en-US", { timeZone: "UTC", month: "short" }),
+  };
 }
 
-/** "Monday, September 28" for a YYYY-MM-DD date. */
-export function formatDate(date: string) {
-  const [y, m, d] = date.split("-").map(Number);
-  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-US", { timeZone: "UTC", weekday: "long", month: "long", day: "numeric" });
+/** "Oct 1" for a YYYY-MM-DD date. */
+export function shortDate(date: string) {
+  return utc(date).toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric" });
+}
+
+/** "Thu, Oct 1" for a YYYY-MM-DD date. */
+export function longDate(date: string) {
+  return utc(date).toLocaleDateString("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" });
 }
 
 export function methodLabel(id: string) {
   return methods.find((m) => m.id === id)?.label ?? "";
 }
 
-export function methodShort(id: string) {
-  return methods.find((m) => m.id === id)?.short ?? "";
-}
-
 /** Where the visit happens, for the confirmation and the calendar file. */
 export function locationLine(b: BookingData) {
-  if (b.method === "video") return "Video call – we’ll text you the link before the appointment";
-  if (b.method === "phone") return `Phone call – the doctor will call ${b.cellPhone}`;
+  if (b.method === "virtual") return "Virtual visit – the doctor will contact you";
   return `${clinicLocation.clinic}, ${clinicLocation.address}`;
 }
 
-function stamp(date: string, minutes: number) {
-  return `${date.replaceAll("-", "")}T${pad(Math.floor(minutes / 60))}${pad(minutes % 60)}00`;
+/** The clinic's local date and time as a UTC instant (America/Vancouver, daylight saving included). */
+function clinicTimeToUtc(date: string, minutes: number) {
+  const [y, m, d] = date.split("-").map(Number);
+  const guess = Date.UTC(y, m - 1, d, Math.floor(minutes / 60), minutes % 60);
+  const offset = (at: number) => {
+    const p = new Intl.DateTimeFormat("en-CA", { timeZone: clinicLocation.timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(at));
+    const get = (t: string) => Number(p.find((x) => x.type === t)?.value ?? 0);
+    return Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute")) - at;
+  };
+  const first = guess - offset(guess);
+  return new Date(guess - offset(first));
 }
 
-/** An .ics calendar file for the booked appointment (Add to calendar). */
+/** 20261001T163000Z */
+function utcStamp(at: Date) {
+  return at.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+}
+
+/** An .ics calendar file for the booked appointment (Add to calendar); only a chosen time has one. */
 export function calendarFile(b: BookingData) {
   if (b.time === null) return "";
   return [
@@ -273,9 +315,10 @@ export function calendarFile(b: BookingData) {
     "PRODID:-//123 Walk-In Clinic//Booking//EN",
     "BEGIN:VEVENT",
     `UID:${b.date}-${b.time}@123walkin`,
-    `DTSTART;TZID=${clinicLocation.timeZone}:${stamp(b.date, b.time)}`,
-    `DTEND;TZID=${clinicLocation.timeZone}:${stamp(b.date, b.time + 15)}`,
-    `SUMMARY:${clinicLocation.clinic} – ${methodLabel(b.method)}`,
+    `DTSTAMP:${utcStamp(new Date())}`,
+    `DTSTART:${utcStamp(clinicTimeToUtc(b.date, b.time))}`,
+    `DTEND:${utcStamp(new Date(clinicTimeToUtc(b.date, b.time).getTime() + 15 * 60_000))}`,
+    `SUMMARY:${clinicLocation.clinic} – ${methodLabel(b.method)} visit`,
     `LOCATION:${locationLine(b).replaceAll(",", "\\,")}`,
     "END:VEVENT",
     "END:VCALENDAR",

@@ -21,7 +21,7 @@ export type BimbleSlot = { date: string; time: string; doctorId: number };
 export type BimbleReason = { serviceId: number; label: string };
 /** An address suggestion; pick one and fetch its details for the parts. */
 export type BimbleAddressSuggestion = { placeId: string; main: string; secondary: string };
-export type BimbleAddress = { street: string; unit: string; city: string; province: string; postalCode: string };
+export type BimbleAddress = { street: string; unit: string; city: string; province: string; postalCode: string; latitude: number | null; longitude: number | null };
 export type BimbleAllergy = { id: string; name: string; detail: string };
 export type BimblePharmacy = { id: string; name: string; address: string; city: string; province: string; postalCode: string; phone: string };
 
@@ -31,24 +31,31 @@ export type BimbleBookingRequest = {
   dob: string;
   firstName: string;
   lastName: string;
-  sex: string;
+  gender: string;
   address: BimbleAddress;
   reason: string;
   serviceId: number | null;
   allergies: string;
   notes: string;
-  visitType: BimbleVisitType;
-  date: string;
-  time: string;
-  doctorId: number;
-  /** "First available": Bimble picks the doctor who sees this reason at that time (the patient's usual doctor first). */
-  firstAvailable: boolean;
-  /** A pharmacy from the directory, or only a typed name when the directory can't be searched. */
+  /** Left out when unchanged since it was saved: Bimble then books the time it is already holding. */
+  visit?: BimbleVisit;
+  /** Bimble Pharmacy (delivered to the patient), the patient's own pharmacy, or none (a doctor's note or form). */
+  pharmacyChoice: "bimble" | "own" | "none";
+  /** Own pharmacy: one from the directory, or only a typed name when the directory can't be searched. */
   pharmacy: Partial<BimblePharmacy> & { name: string };
   delivery: "" | "delivery" | "pickup";
   pharmacyConsent: boolean;
   emergencyContact: { name: string; phone: string; relation: string };
 };
+
+/** The visit: a time from the chosen doctor's open times. The booking is assigned to that doctor. */
+export type BimbleVisit = { visitType: BimbleVisitType; doctorId: number; date: string; time: string };
+
+/** Reason in the patient's own words, matched to Bimble's list ("Something else"). */
+export type BimbleConcernMatch = { reason: string; serviceId: number; notes: string; options: { reason: string; serviceId: number }[] };
+
+/** One of the doctor's questions before the visit, with the answers to choose from. */
+export type BimbleFollowUpQuestion = { id: string; question: string; options: string[]; multiple: boolean };
 
 export class BimbleError extends Error {
   constructor(
@@ -133,10 +140,39 @@ async function request<T>(path: string, init: { method?: string; body?: unknown;
   return data as T;
 }
 
+/** A call to Bimble's patient API with the token the booking returned (JSON, or a form with files). */
+async function fetchPatient<T = unknown>(path: string, token: string, init: { method?: string; body?: string | FormData } = {}): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(`${bimbleApi}/api/v1${path}`, {
+      method: init.method ?? "GET",
+      headers: { Accept: "application/json", ...(typeof init.body === "string" ? { "Content-Type": "application/json" } : {}), ...patientAuth(token) },
+      body: init.body,
+      cache: "no-store",
+    });
+  } catch {
+    throw new BimbleError("We could not reach the booking system. Please check your connection and try again.");
+  }
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new BimbleError(errorMessage(data), res.status);
+  return data as T;
+}
+
 const intake = "/patient-intake";
 const clinicPath = () => `${intake}/clinics/${encodeURIComponent(bimbleClinicSlug)}`;
 const query = (params: Record<string, string | number | null | undefined>) =>
   new URLSearchParams(Object.entries(params).flatMap(([k, v]) => (v === null || v === undefined || v === "" ? [] : [[k, String(v)]]))).toString();
+
+const visitBody = (v: BimbleVisit) => ({
+  visitType: v.visitType,
+  slotPreference: "preferred",
+  appointmentDate: v.date,
+  appointmentTime: v.time,
+  requestedDoctorId: v.doctorId,
+});
+
+/** Both headers Bimble's patient pages send with the patient's token. */
+const patientAuth = (token: string) => ({ Authorization: `Bearer ${token}`, "X-Bimble-Authorization": `Bearer ${token}` });
 
 /** Minutes after midnight for Bimble's "9:15 AM" slot labels. */
 export function slotMinutes(label: string) {
@@ -193,7 +229,7 @@ export const bimble = {
 
   /** Open times over the next 8 days for one doctor, or merged across doctors (first doctor wins a shared time). */
   async slots(doctorIds: number[], visitType: BimbleVisitType): Promise<BimbleSlot[]> {
-    const lists = await Promise.all(
+    const settled = await Promise.allSettled(
       doctorIds.map(async (id) => {
         const r = await request<SlotsResponse>(`${clinicPath()}/doctors/${id}/slots?visitType=${visitType}&days=8`);
         return Object.entries(r.slots_by_date ?? {}).flatMap(([date, groups]) =>
@@ -201,6 +237,9 @@ export const bimble = {
         );
       }),
     );
+    // A doctor whose times fail to load is left out; only when every one fails is it an error.
+    const lists = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+    if (!lists.length && settled.length) throw (settled[0] as PromiseRejectedResult).reason;
     const byStart = new Map<string, BimbleSlot>();
     for (const slot of lists.flat()) {
       const key = `${slot.date} ${slotMinutes(slot.time)}`;
@@ -226,7 +265,16 @@ export const bimble = {
   /** Street, city, province and postal code for a picked suggestion. */
   async addressDetails(placeId: string): Promise<BimbleAddress> {
     const { result: d } = await request<{
-      result: { address_line?: string; street_address?: string; unit_number?: string | null; city?: string; province?: string; postal_code?: string };
+      result: {
+        address_line?: string;
+        street_address?: string;
+        unit_number?: string | null;
+        city?: string;
+        province?: string;
+        postal_code?: string;
+        latitude?: number | null;
+        longitude?: number | null;
+      };
     }>(`/location/details?${query({ placeId, focus_bc: "true" })}`);
     return {
       street: d.address_line || d.street_address || "",
@@ -234,6 +282,8 @@ export const bimble = {
       city: d.city || "",
       province: d.province || "",
       postalCode: d.postal_code || "",
+      latitude: typeof d.latitude === "number" ? d.latitude : null,
+      longitude: typeof d.longitude === "number" ? d.longitude : null,
     };
   },
 
@@ -310,6 +360,75 @@ export const bimble = {
     };
   },
 
+  /**
+   * "Something else": matches the patient's own words to a reason in Bimble's list, as Bimble's
+   * clinic booking does. When more than one reason fits, `options` lists them to choose from.
+   */
+  async matchConcern(text: string): Promise<BimbleConcernMatch> {
+    const r = await request<{
+      care_reason: string;
+      service_id: number;
+      care_reason_notes?: string;
+      requires_primary_selection?: boolean;
+      primary_concern_options?: { concern: string; service_id: number }[];
+    }>(`${intake}/concern/resolve`, { method: "POST", body: { transcript: text } });
+    return {
+      reason: r.care_reason,
+      serviceId: r.service_id,
+      notes: r.care_reason_notes ?? "",
+      options: r.requires_primary_selection ? (r.primary_concern_options ?? []).map((o) => ({ reason: o.concern, serviceId: o.service_id })) : [],
+    };
+  },
+
+  /**
+   * Saves the reason, doctor and time for the verified patient, as Bimble's own booking does on
+   * Continue: Bimble checks the time now (too close, taken, another booking of theirs) and holds
+   * it with that doctor while the patient finishes.
+   */
+  async saveVisit(token: string, h: { reason: string; serviceId: number | null; visit: BimbleVisit }) {
+    await request<{ snapshot: Record<string, unknown> }>(`${intake}/session`, {
+      method: "PATCH",
+      token,
+      body: { concern: { careReason: h.reason, serviceId: h.serviceId }, visit: visitBody(h.visit) },
+    });
+  },
+
+  /** The doctor's questions for this booking (Bimble may still be preparing them). */
+  async followUpQuestions(token: string, appointmentId: number) {
+    const r = await fetchPatient<{ questions?: { id: string; question: string; options?: string[]; allow_multiple?: boolean; allowMultiple?: boolean }[]; generation_status?: string }>(
+      `/patient/appointments/${appointmentId}/follow-up/questions`,
+      token,
+    );
+    return {
+      questions: (r.questions ?? []).map<BimbleFollowUpQuestion>((q) => ({ id: q.id, question: q.question, options: q.options ?? [], multiple: Boolean(q.allow_multiple ?? q.allowMultiple) })),
+      failed: r.generation_status === "FAILED",
+    };
+  },
+
+  /** Saves the answers, in the shape Bimble's own preparation screen sends. */
+  saveFollowUp(token: string, appointmentId: number, answers: { q: BimbleFollowUpQuestion; picked: string[]; other: string }[]) {
+    return fetchPatient(`/patient/appointments/${appointmentId}/follow-up`, token, {
+      method: "POST",
+      body: JSON.stringify({
+        answers: answers.map(({ q, picked, other }) => ({
+          id: q.id,
+          question: q.question,
+          options: q.options,
+          selected_options: picked,
+          other_text: other.trim() || null,
+          answer: [...picked, other.trim()].filter(Boolean).join("; "),
+        })),
+      }),
+    });
+  },
+
+  /** Photos of the problem for the doctor: up to 5 JPG, PNG, WebP or GIF images, 8 MB each. */
+  uploadProblemPictures(token: string, appointmentId: number, files: File[]) {
+    const form = new FormData();
+    files.forEach((f) => form.append("files", f));
+    return fetchPatient(`/patient/appointments/${appointmentId}/follow-up/images`, token, { method: "POST", body: form });
+  },
+
   /** Checks the code; the returned token authorizes this one booking. */
   verifyPhone(intakeSessionId: number, code: string) {
     return request<{ access_token: string }>(`${intake}/phone/verify`, {
@@ -322,7 +441,8 @@ export const bimble = {
   book(token: string, b: BimbleBookingRequest) {
     const pharmacy = b.pharmacy.name.trim();
     const contact = b.emergencyContact;
-    return request<{ appointment_id: number; status: string; assigned_doctor_name?: string | null }>(`${intake}/book`, {
+    const location = b.address.latitude !== null && b.address.longitude !== null ? { patientLatitude: b.address.latitude, patientLongitude: b.address.longitude } : {};
+    return request<{ appointment_id: number; status: string; patient_access_token?: string; upload_problem_images?: boolean }>(`${intake}/book`, {
       method: "POST",
       token,
       body: {
@@ -330,7 +450,7 @@ export const bimble = {
         profile: {
           firstName: b.firstName,
           lastName: b.lastName,
-          gender: b.sex,
+          gender: b.gender,
           addressLine: b.address.street,
           unitNumber: b.address.unit || null,
           city: b.address.city,
@@ -338,10 +458,14 @@ export const bimble = {
           postalCode: b.address.postalCode,
         },
         concern: { careReason: b.reason, careReasonNotes: b.notes || null, allergies: b.allergies.trim() || null, serviceId: b.serviceId },
-        visit: { visitType: b.visitType, slotPreference: "preferred", appointmentDate: b.date, appointmentTime: b.time, requestedDoctorId: b.doctorId, firstAvailable: b.firstAvailable },
+        ...(b.visit ? { visit: visitBody(b.visit) } : {}),
         booking: {
-          ...(pharmacy
-            ? {
+          ...(b.pharmacyChoice === "none"
+            ? // Nothing to send to a pharmacy: Bimble takes "later" from a clinic's own site, with no consent.
+              { pharmacyChoice: "later" }
+            : b.pharmacyChoice === "bimble"
+            ? { pharmacyChoice: "bimble", fulfillment: "delivery", prescriptionPharmacyConsent: b.pharmacyConsent }
+            : {
                 pharmacyChoice: "preferred",
                 fulfillment: b.delivery || undefined,
                 prescriptionPharmacyConsent: b.pharmacyConsent,
@@ -350,8 +474,8 @@ export const bimble = {
                 preferredPharmacyCity: b.pharmacy.city || undefined,
                 preferredPharmacyPostalCode: b.pharmacy.postalCode || undefined,
                 preferredPharmacyPhone: b.pharmacy.phone || undefined,
-              }
-            : { pharmacyChoice: "later" }),
+              }),
+          ...location,
           serviceId: b.serviceId,
           allergies: b.allergies.trim() || null,
           ...(contact.name.trim() ? { emergencyContact: { name: contact.name.trim(), phone: contact.phone.trim(), relation: contact.relation || null } } : {}),

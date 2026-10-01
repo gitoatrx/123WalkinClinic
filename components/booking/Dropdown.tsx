@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { CheckIcon, ChevronDownIcon } from "@/components/icons";
 import { cn } from "@/lib/ui";
 
@@ -10,7 +10,8 @@ export type DropdownOption = { value: string; label: string };
  * A select styled like the rest of the booking form (the browser's own option list can't be).
  * Keyboard: arrows move, Enter or Space picks, Escape closes, typing a letter jumps to it.
  * `anchored`: the list lines up with the nearest positioned parent (a labelled grey box)
- * instead of the button itself.
+ * instead of the button itself. The whole list shows without scrolling: it opens below the
+ * field, or above it when there is more room there, and otherwise scrolls the page to show it.
  */
 export function Dropdown({
   id,
@@ -37,6 +38,7 @@ export function Dropdown({
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
+  const [up, setUp] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const list = useRef<HTMLUListElement>(null);
   const listId = useId();
@@ -51,9 +53,19 @@ export function Dropdown({
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
 
-  useEffect(() => {
-    if (open) list.current?.children[active]?.scrollIntoView({ block: "nearest" });
-  }, [open, active]);
+  // Keep the open list inside the window.
+  useLayoutEffect(() => {
+    if (!open || !list.current || !root.current) return;
+    const field = (root.current.querySelector("button") ?? root.current).getBoundingClientRect();
+    const need = list.current.offsetHeight + 12;
+    const below = window.innerHeight - field.bottom;
+    if (need <= below) setUp(false);
+    else if (need <= field.top) setUp(true);
+    else {
+      setUp(false);
+      window.scrollBy({ top: field.bottom + need - window.innerHeight + 8 });
+    }
+  }, [open]);
 
   const show = () => {
     setActive(Math.max(0, options.findIndex((o) => o.value === value)));
@@ -121,7 +133,10 @@ export function Dropdown({
           id={listId}
           ref={list}
           role="listbox"
-          className="absolute top-full right-0 left-0 z-30 mt-1.5 max-h-64 overflow-auto rounded-[14px] border border-[#e1e8ee] bg-white py-1.5 shadow-[0_12px_32px_rgb(20_36_58/0.16)]"
+          className={cn(
+            "absolute right-0 left-0 z-30 rounded-[14px] border border-[#e1e8ee] bg-white p-1 shadow-[0_12px_32px_rgb(20_36_58/0.16)]",
+            up ? "bottom-full mb-1.5" : "top-full mt-1.5",
+          )}
         >
           {options.map((o, i) => (
             <li
@@ -132,8 +147,9 @@ export function Dropdown({
               onMouseEnter={() => setActive(i)}
               onClick={() => pick(o)}
               className={cn(
-                "flex cursor-pointer items-center justify-between gap-3 px-4 py-2.5 text-[15px] font-semibold text-[#14243a]",
+                "flex cursor-pointer items-center justify-between gap-3 rounded-lg px-3 py-1.5 text-[14px] font-semibold text-[#14243a]",
                 i === active && "bg-[#f0f4f7]",
+                o.value === value && "bg-[#fbecc4]",
               )}
             >
               <span className="truncate">{o.label}</span>
