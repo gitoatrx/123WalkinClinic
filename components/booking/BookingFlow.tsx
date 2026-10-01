@@ -327,8 +327,9 @@ export function BookingFlow() {
     if (!live) {
       setAnySlots(
         availableDates()
-          .flatMap((date) => DEMO_DOCTORS.flatMap((d) => availableTimes(date, `${b.method}-${d.id}`).map((t) => ({ date, t, doctorId: d.id }))))
-          .sort((x, y) => x.date.localeCompare(y.date) || x.t - y.t)
+          .flatMap((date) => DEMO_DOCTORS.flatMap((d) => availableTimes(date, `${b.method}-${d.id}`).map((t) => ({ date, t, doctorId: d.id, tie: Math.random() }))))
+          // A time several doctors share goes to one of them at random, as with Bimble's times.
+          .sort((x, y) => x.date.localeCompare(y.date) || x.t - y.t || x.tie - y.tie)
           .map((x) => ({ date: x.date, time: timeLabel(x.t), doctorId: x.doctorId })),
       );
       return;

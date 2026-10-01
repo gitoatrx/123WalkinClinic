@@ -227,7 +227,7 @@ export const bimble = {
     };
   },
 
-  /** Open times over the next 8 days for one doctor, or merged across doctors (first doctor wins a shared time). */
+  /** Open times over the next 8 days for one doctor, or merged across doctors (a time several doctors share goes to one of them at random). */
   async slots(doctorIds: number[], visitType: BimbleVisitType): Promise<BimbleSlot[]> {
     const settled = await Promise.allSettled(
       doctorIds.map(async (id) => {
@@ -240,12 +240,21 @@ export const bimble = {
     // A doctor whose times fail to load is left out; only when every one fails is it an error.
     const lists = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
     if (!lists.length && settled.length) throw (settled[0] as PromiseRejectedResult).reason;
-    const byStart = new Map<string, BimbleSlot>();
+    // A shared time goes to a doctor picked at random (reservoir sampling), so the doctor
+    // listed first doesn't take every tie.
+    const byStart = new Map<string, { slot: BimbleSlot; seen: number }>();
     for (const slot of lists.flat()) {
       const key = `${slot.date} ${slotMinutes(slot.time)}`;
-      if (!byStart.has(key)) byStart.set(key, slot);
+      const held = byStart.get(key);
+      if (!held) byStart.set(key, { slot, seen: 1 });
+      else {
+        held.seen += 1;
+        if (Math.random() < 1 / held.seen) held.slot = slot;
+      }
     }
-    return [...byStart.values()].sort((a, b) => a.date.localeCompare(b.date) || slotMinutes(a.time) - slotMinutes(b.time));
+    return [...byStart.values()]
+      .map((x) => x.slot)
+      .sort((a, b) => a.date.localeCompare(b.date) || slotMinutes(a.time) - slotMinutes(b.time));
   },
 
   /** Address suggestions in BC (Bimble's address search, as its own booking pages use). */
